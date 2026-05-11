@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+venv/
+
+# Output (generated at runtime)
+output/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/

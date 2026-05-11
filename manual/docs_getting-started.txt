@@ -1,0 +1,9 @@
+ðï¸
+What is 4ga Boards?
+Hello! This guide aims to provide a comprehensive tutorial for you to get started with 4ga Boards. In the upcoming sections we will show you all of the important features of our tool.
+ðï¸
+Creating an Account
+If you succesfully deployed 4ga Boards or your organization has already provided you with working one, it is time to create your account. To do this, simply go to the web adress of your 4ga Boards.
+ðï¸
+Import/Export
+Import from Trello

@@ -1,0 +1,25 @@
+# LangGraph & LangChain
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+
+# Vector Store & Embeddings
+chromadb>=0.5.0
+
+# LLM Provider (国产大模型统一通过 LangChain ChatOpenAI 接口接入)
+# ZhipuAI embedding 仍需此包
+zhipuai>=2.4.1
+
+# Browser Automation
+playwright>=1.44.0
+
+# Web Scraping & Parsing
+beautifulsoup4>=4.12.3
+
+# Visualization
+streamlit>=1.38.0
+
+# Utilities
+python-dotenv>=1.0.0

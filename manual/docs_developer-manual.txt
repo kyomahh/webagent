@@ -1,0 +1,21 @@
+ðï¸
+Development
+2 items
+ðï¸
+Installation
+5 items
+ðï¸
+Backup and Restore
+Backup 4ga Boards instance
+ðï¸
+Web Server Configuration
+Nginx, Apache, Caddy, SSL
+ðï¸
+SSO
+Setup Google SSO
+ðï¸
+API
+4ga Boards API
+ðï¸
+Additional Information
+Logging, Rotating Logs, Fail2Ban, other
