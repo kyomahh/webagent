@@ -859,28 +859,89 @@ python -m pytest tests/test_verification_tool.py -v
 
 ---
 
-### 所有组员完成后：注册模块
+### 注册模块（每个组员完成实现后都要做）
 
-三人全部完成后，创建 `tools/impl/__init__.py` 汇总注册：
+你需要把你的类注册到 `tools/impl/__init__.py`，框架才能找到你的实现。
+**每个组员各自往这个文件里加一个函数**，不要动别人的。
+
+#### 组员 A：注册 RAG 模块
+
+你创建的文件：`tools/impl/rag_impl.py`
+你的类名：`MyRagTool`
+你要注册的函数：`get_rag_tool`
+
+在 `tools/impl/__init__.py` 中添加：
 
 ```python
-from core.config import AgentConfig
+def get_rag_tool(config):
+    """组员 A 注册处 —— 导入你的类，创建实例返回。"""
+    from tools.impl.rag_impl import MyRagTool     # ← 改成你的类名
+    return MyRagTool(config)
+```
+
+#### 组员 B：注册执行模块
+
+你创建的文件：`tools/impl/execution_impl.py`
+你的类名：`MyExecutionTool`
+你要注册的函数：`get_execution_tool`
+
+在 `tools/impl/__init__.py` 中添加：
+
+```python
+def get_execution_tool(config):
+    """组员 B 注册处 —— 导入你的类，创建实例返回。"""
+    from tools.impl.execution_impl import MyExecutionTool     # ← 改成你的类名
+    return MyExecutionTool(config)
+```
+
+#### 组员 C：注册验证模块
+
+你创建的文件：`tools/impl/verification_impl.py`
+你的类名：`MyVerificationTool`
+你要注册的函数：`get_verification_tool`
+
+在 `tools/impl/__init__.py` 中添加：
+
+```python
+def get_verification_tool(config):
+    """组员 C 注册处 —— 导入你的类，创建实例返回。"""
+    from tools.impl.verification_impl import MyVerificationTool     # ← 改成你的类名
+    return MyVerificationTool(config)
+```
+
+#### 完整的 `tools/impl/__init__.py`（三人写完后长这样）
+
+```python
+"""模块注册 —— main.py 通过这个文件加载组员的实现。"""
 
 
-def get_rag_tool(config: AgentConfig):
+def get_rag_tool(config):
     from tools.impl.rag_impl import MyRagTool
     return MyRagTool(config)
 
 
-def get_execution_tool(config: AgentConfig):
+def get_execution_tool(config):
     from tools.impl.execution_impl import MyExecutionTool
     return MyExecutionTool(config)
 
 
-def get_verification_tool(config: AgentConfig):
+def get_verification_tool(config):
     from tools.impl.verification_impl import MyVerificationTool
     return MyVerificationTool(config)
 ```
+
+#### 注册汇总表
+
+| 组员 | 你创建的文件 | 你的类名 | 你要注册的函数 | 继承的接口 |
+|------|------------|---------|--------------|-----------|
+| 组员 A | `tools/impl/rag_impl.py` | `MyRagTool` | `get_rag_tool(config)` | `RagToolInterface` |
+| 组员 B | `tools/impl/execution_impl.py` | `MyExecutionTool` | `get_execution_tool(config)` | `ExecutionToolInterface` |
+| 组员 C | `tools/impl/verification_impl.py` | `MyVerificationTool` | `get_verification_tool(config)` | `VerificationToolInterface` |
+
+**注意事项**：
+- 类名可以自定义（不一定要叫 `MyXxxTool`），但注册函数名必须固定（`get_rag_tool` 等），因为 `main.py` 按这个名字调用
+- 每个组员只加自己的注册函数，不要动别人的
+- 注册函数里用 `from tools.impl.xxx_impl import ...` 延迟导入，避免循环依赖
 
 注册完成后，去掉 `--stub` 即可使用真实模块：
 

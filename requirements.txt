@@ -17,6 +17,8 @@ playwright>=1.44.0
 
 # Web Scraping & Parsing
 beautifulsoup4>=4.12.3
+requests>=2.31.0
+lxml>=5.0.0
 
 # Visualization
 streamlit>=1.38.0
