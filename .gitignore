@@ -9,9 +9,21 @@ venv/
 # Output (generated at runtime)
 output/
 
+# ChromaDB vector store
+chroma_db/
+
 # Environment variables
 .env
 
 # IDE
 .vscode/
 .idea/
+
+# Claude Code
+.claude/
+
+# Pytest
+.pytest_cache/
+
+# OS
+.DS_Store

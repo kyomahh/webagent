@@ -1,3 +1,3 @@
-from tools.rag_tool import RagToolInterface, make_rag_tools
+from tools.rag_tool import RagToolInterface, DataCache, make_rag_tools
 from tools.execution_tool import ExecutionToolInterface, make_execution_tools
 from tools.verification_tool import VerificationToolInterface, make_verification_tools

@@ -1,75 +1,51 @@
-"""StateGraph 构建 —— 将节点、边、条件路由组装为可编译的 Graph。"""
+"""ReAct Agent 构建 —— 使用 create_react_agent 让 LLM 自主决策工具调用。"""
 
-from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import create_react_agent
 
-from agent.state import AgentState
-from agent.nodes import make_nodes, route_after_classify, route_after_verify
-from tools.rag_tool import RagToolInterface
-from tools.execution_tool import ExecutionToolInterface
-from tools.verification_tool import VerificationToolInterface
+from agent.prompt import build_system_prompt
+from core.llm import get_llm
+from tools.rag_tool import RagToolInterface, DataCache, make_rag_tools
+from tools.execution_tool import ExecutionToolInterface, make_execution_tools
+from tools.verification_tool import VerificationToolInterface, make_verification_tools
+from core.config import AgentConfig
 
 
 def build_agent_graph(
     rag_tool: RagToolInterface,
     execution_tool: ExecutionToolInterface,
     verification_tool: VerificationToolInterface,
+    config: AgentConfig,
 ):
-    """构建并编译 LangGraph StateGraph。
+    """构建 ReAct Agent，让 LLM 自主决定调用哪个工具。
 
     Args:
         rag_tool: 数据与RAG模块实现
         execution_tool: 执行与交互模块实现
         verification_tool: 验证与可视化模块实现
+        config: Agent 配置
 
     Returns:
-        编译后的 CompiledGraph，可调用 .invoke(initial_state)
+        编译后的 ReAct Agent，可调用 .invoke(initial_state)
     """
-    nodes = make_nodes(rag_tool, execution_tool, verification_tool)
+    llm = get_llm(config.model_name)
 
-    graph = StateGraph(AgentState)
+    # 共享数据缓存，跨工具模块传递数据
+    cache = DataCache()
 
-    # ── 添加节点 ──
-    graph.add_node("classify", nodes["classify"])
-    graph.add_node("crawl_manual", nodes["crawl_manual"])
-    graph.add_node("build_rag", nodes["build_rag"])
-    graph.add_node("generate_tests", nodes["generate_tests"])
-    graph.add_node("plan", nodes["plan"])
-    graph.add_node("execute", nodes["execute"])
-    graph.add_node("verify", nodes["verify"])
-    graph.add_node("visualize", nodes["visualize"])
-
-    # ── 入口 ──
-    graph.set_entry_point("classify")
-
-    # ── 条件路由：是否需要爬取 ──
-    graph.add_conditional_edges(
-        "classify",
-        route_after_classify,
-        {
-            "crawl": "crawl_manual",
-            "skip": "build_rag",
-        },
+    all_tools = (
+        make_rag_tools(rag_tool, cache)
+        + make_execution_tools(execution_tool, config.target_url, cache,
+                               output_dir=config.output_dir,
+                               headless=config.headless)
+        + make_verification_tools(verification_tool, cache)
     )
 
-    # ── 线性边 ──
-    graph.add_edge("crawl_manual", "build_rag")
-    graph.add_edge("build_rag", "generate_tests")
-    graph.add_edge("generate_tests", "plan")
-    graph.add_edge("plan", "execute")
-    graph.add_edge("execute", "verify")
-
-    # ── 条件路由：验证结果 ──
-    graph.add_conditional_edges(
-        "verify",
-        route_after_verify,
-        {
-            "passed": "visualize",
-            "retry": "plan",
-            "max_retries": "visualize",
-        },
+    prompt = build_system_prompt(
+        target_url=config.target_url,
+        manual_url=config.manual_url,
+        manual_dir=config.manual_dir,
+        chroma_dir=config.chroma_dir,
+        max_retries=config.max_retries,
     )
 
-    # ── 终止 ──
-    graph.add_edge("visualize", END)
-
-    return graph.compile()
+    return create_react_agent(llm, all_tools, prompt=prompt)

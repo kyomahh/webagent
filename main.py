@@ -75,12 +75,14 @@ def main():
             print("请使用 --stub 模式先生成报告，或等待可视化模块实现。")
         return
 
-    # 导入并构建 Graph
+    # 导入并构建 Agent
     from core.config import default_config
     from agent import build_agent_graph
 
     config = default_config()
     config.target_url = args.url
+    config.manual_url = args.manual
+    config.manual_dir = args.manual_dir
     config.model_name = args.model
     config.max_retries = args.max_retries
     config.headless = args.headless
@@ -116,32 +118,46 @@ def main():
     print(f"  最大重试: {config.max_retries}")
     print("=" * 60)
 
-    # 构建 Graph
-    graph = build_agent_graph(rag_tool, execution_tool, verification_tool)
+    # 构建 ReAct Agent
+    graph = build_agent_graph(rag_tool, execution_tool, verification_tool, config)
 
-    # 初始状态
-    initial_state = {
+    # 构建初始用户消息
+    manual_desc = ""
+    if args.manual:
+        manual_desc = f"远程手册 URL: {args.manual}"
+    elif args.manual_dir:
+        manual_desc = f"本地手册目录: {args.manual_dir}"
+    else:
+        manual_desc = "未指定手册来源，请自行判断目标网站是否存在用户手册并尝试获取"
+
+    initial_message = (
+        f"请对目标网站 {config.target_url} 进行自动化测试。"
+        f"手册来源: {manual_desc}。"
+        f"向量库目录: {config.chroma_dir}。"
+        f"最大重试次数: {config.max_retries}。"
+        f"请按推荐工作流依次调用工具完成测试。"
+    )
+
+    # 执行
+    result = graph.invoke({
         "target_url": config.target_url,
         "manual_url": args.manual,
         "manual_dir": args.manual_dir,
-        "messages": [],
         "chroma_dir": config.chroma_dir,
         "max_retries": config.max_retries,
-    }
-
-    # 执行
-    result = graph.invoke(initial_state)
+        "retry_count": 0,
+        "messages": [("user", initial_message)],
+    })
 
     print()
     print("=" * 60)
     print("执行完成!")
-    print(f"  报告路径: {result.get('report_path', 'N/A')}")
-
-    verification_results = result.get("verification_results", {})
-    if verification_results:
-        total = len(verification_results)
-        passed = sum(1 for v in verification_results.values() if v.get("passed"))
-        print(f"  测试结果: {passed}/{total} 通过")
+    # 从最后的消息中提取报告信息
+    for msg in reversed(result.get("messages", [])):
+        content = msg.content if hasattr(msg, "content") else str(msg)
+        if "报告已生成" in content:
+            print(f"  {content}")
+            break
     print("=" * 60)
 
 

@@ -87,35 +87,114 @@ class RagToolInterface(BaseTool):
         ...
 
 
-def make_rag_tools(rag_impl: RagToolInterface):
-    """将 RagToolInterface 实现包装为 LangGraph @tool 函数。"""
+class DataCache:
+    """跨工具模块共享的数据缓存。"""
+
+    def __init__(self):
+        self.documents: list[dict] = []
+        self.features: list[dict] = []
+        self.test_cases: list[dict] = []
+        self.execution_plans: dict[str, list[dict]] = {}
+        self.execution_results: dict[str, list[dict]] = {}
+        self.execution_memory: dict = {}
+        self.verification_results: dict[str, dict] = {}
+
+
+def make_rag_tools(rag_impl: RagToolInterface, cache: DataCache):
+    """将 RagToolInterface 实现包装为 LangGraph @tool 函数。
+
+    工具间通过 cache 共享数据，LLM 只看到摘要字符串。
+    """
 
     @tool
-    def crawl_manual(url: str) -> list[dict]:
-        """爬取指定 URL 的用户手册文档。"""
-        return rag_impl.crawl_and_load_manual(url)
+    def crawl_manual(url: str) -> str:
+        """爬取指定 URL 的用户手册文档。
+        可用于探测目标网站是否存在手册页面，如果 URL 无效或未找到文档会返回错误信息。
+
+        Args:
+            url: 用户手册网站 URL
+
+        Returns:
+            爬取结果摘要，包含文档数量；失败时返回错误描述
+        """
+        try:
+            documents = rag_impl.crawl_and_load_manual(url)
+            if not documents:
+                return f"未从 {url} 获取到任何文档，该 URL 可能不存在手册页面。请尝试其他路径或跳过手册步骤。"
+            cache.documents = documents
+            return f"成功爬取 {len(documents)} 页手册文档，来源: {url}"
+        except Exception as e:
+            return f"爬取 {url} 失败: {e}。请尝试其他 URL 或跳过手册步骤。"
 
     @tool
-    def load_local_manual(directory: str) -> list[dict]:
-        """从本地目录加载手册文档。"""
-        return rag_impl.load_local_manual(directory)
+    def load_local_manual(directory: str) -> str:
+        """从本地目录加载手册文档。
+
+        Args:
+            directory: 手册目录路径
+
+        Returns:
+            加载结果摘要
+        """
+        documents = rag_impl.load_local_manual(directory)
+        cache.documents = documents
+        return f"成功加载 {len(documents)} 个本地文档，目录: {directory}"
 
     @tool
-    def build_knowledge_base(documents: list[dict], persist_dir: str = "") -> str:
-        """构建 RAG 知识库。"""
-        return rag_impl.build_knowledge_base(
-            documents, persist_dir if persist_dir else None
+    def build_knowledge_base(persist_dir: str = "chroma_db") -> str:
+        """构建 RAG 知识库（使用上一步获取的文档）。
+
+        Args:
+            persist_dir: 向量库持久化目录
+
+        Returns:
+            知识库路径
+        """
+        if not cache.documents:
+            return "警告: 当前没有文档数据。请先调用 crawl_manual 或 load_local_manual 获取手册文档，再构建知识库。"
+        vector_store_path = rag_impl.build_knowledge_base(
+            cache.documents, persist_dir if persist_dir else None
         )
+        return f"知识库已构建: {vector_store_path}，基于 {len(cache.documents)} 个文档"
 
     @tool
-    def extract_features(vector_store_path: str) -> list[dict]:
-        """从知识库中提取功能点。"""
-        return rag_impl.extract_features(vector_store_path)
+    def extract_features(vector_store_path: str) -> str:
+        """从知识库中提取功能点。
+
+        Args:
+            vector_store_path: 向量库路径
+
+        Returns:
+            功能点摘要列表
+        """
+        features = rag_impl.extract_features(vector_store_path)
+        cache.features = features
+        lines = [f"共提取 {len(features)} 个功能点:"]
+        for f in features:
+            lines.append(f"  - {f.get('feature_id', '')}: {f.get('feature_name', '')} - {f.get('description', '')}")
+        return "\n".join(lines)
 
     @tool
-    def generate_scenarios(features: list[dict], vector_store_path: str) -> list[dict]:
-        """根据功能点生成测试用例。"""
-        return rag_impl.generate_scenarios(features, vector_store_path)
+    def generate_scenarios(vector_store_path: str) -> str:
+        """根据已提取的功能点生成测试用例。
+
+        Args:
+            vector_store_path: 向量库路径
+
+        Returns:
+            测试用例摘要列表
+        """
+        if not cache.features:
+            return "警告: 当前没有功能点数据。请先调用 extract_features 提取功能点，再生成测试用例。"
+        test_cases = rag_impl.generate_scenarios(cache.features, vector_store_path)
+        cache.test_cases = test_cases
+        lines = [f"共生成 {len(test_cases)} 个测试用例:"]
+        for tc in test_cases:
+            sid = tc.get("scenario_id", "")
+            name = tc.get("scenario_name", "")
+            steps_count = len(tc.get("steps", []))
+            lines.append(f"  - {sid}: {name} ({steps_count} 步)")
+        return "\n".join(lines)
 
     return [crawl_manual, load_local_manual, build_knowledge_base,
             extract_features, generate_scenarios]
