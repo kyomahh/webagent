@@ -10,7 +10,7 @@ chromadb>=0.5.0
 
 # LLM Provider (国产大模型统一通过 LangChain ChatOpenAI 接口接入)
 # ZhipuAI embedding 仍需此包
-zhipuai>=2.4.1
+zhipuai>=2.1.5
 
 # Browser Automation
 playwright>=1.44.0
