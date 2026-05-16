@@ -10,8 +10,8 @@
 import pytest
 
 # ──── 组员修改此处：替换为你的实现 ────
-# from tools.impl.execution_impl import MyExecutionTool
-from tools.stub.execution_stub import StubExecutionTool as ImplToTest
+from tools.impl.execution_impl import PlaywrightExecutionTool as ImplToTest
+#from tools.stub.execution_stub import StubExecutionTool as ImplToTest
 
 from conftest import (
     assert_execution_step_format,
@@ -21,7 +21,8 @@ from conftest import (
 
 @pytest.fixture
 def execution():
-    return ImplToTest()
+    from core.config import default_config
+    return ImplToTest(default_config())
 
 
 # ══════════════════════════════════════════════════

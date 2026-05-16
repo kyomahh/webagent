@@ -41,9 +41,9 @@ def main():
         help="本地手册目录路径 (如: ./manual)",
     )
     parser.add_argument(
-        "--model", type=str, default="glm-4-flash",
-        choices=["glm-4-flash", "glm-4-plus", "deepseek-chat", "qwen-plus"],
-        help="使用的 LLM 模型 (默认: glm-4-flash)",
+        "--model", type=str, default="glm-4.7-flash",
+        choices=["glm-4.7-flash", "glm-4-plus", "deepseek-chat", "qwen-plus"],
+        help="使用的 LLM 模型 (默认: glm-4.7-flash)",
     )
     parser.add_argument(
         "--max-retries", type=int, default=2,

@@ -1,21 +1,43 @@
 """规划者节点 —— 分析当前状态，决定下一步动作。"""
 
-from pydantic import BaseModel, Field
+import json
+import re
 
 from agent.state import AgentState
 from agent.prompt import build_planner_prompt, AVAILABLE_ACTIONS
 from core.llm import get_llm
 
 
-class PlannedAction(BaseModel):
-    """下一步要执行的动作"""
-    action: str = Field(description="动作名，必须从可用动作清单中选择")
-    args: dict = Field(description="动作参数")
-    reason: str = Field(description="为什么选这个动作")
-
-
 # 建立 action 名称集合，用于校验
 _VALID_ACTIONS = {a["action"] for a in AVAILABLE_ACTIONS}
+
+
+def _parse_llm_json(text: str) -> dict:
+    """从 LLM 输出中提取 JSON，兼容多种格式。"""
+    # 尝试直接解析
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 尝试提取 ```json ... ``` 代码块
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 尝试提取第一个完整的 {...}
+    m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return {}
 
 
 def make_planner_node(config):
@@ -28,7 +50,6 @@ def make_planner_node(config):
         chroma_dir=config.chroma_dir,
         max_retries=config.max_retries,
     )
-    structured_llm = llm.with_structured_output(PlannedAction)
 
     def planner_node(state: AgentState) -> dict:
         # 构建当前状态摘要
@@ -73,26 +94,28 @@ def make_planner_node(config):
 ## 原始需求
 {state.get('input', '')}
 
-请根据以上状态决定下一步动作。"""
+请根据以上状态决定下一步动作，必须严格按以下 JSON 格式输出，不要输出其他内容：
+{{"action": "动作名", "args": {{"参数名": "参数值"}}, "reason": "选择原因"}}"""
 
-        result = structured_llm.invoke([
+        response = llm.invoke([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ])
 
-        # 校验 action 合法性
-        action_name = result.action
-        if action_name not in _VALID_ACTIONS:
-            # 回退：选第一个未执行的动作
-            action_name = _fallback_action(state)
-            result = PlannedAction(
-                action=action_name,
-                args=_default_args(action_name, state),
-                reason=f"原始动作 {result.action} 无效，回退选择 {action_name}",
-            )
+        # 解析 LLM 输出
+        parsed = _parse_llm_json(response.content)
+        action_name = parsed.get("action", "")
+        args = parsed.get("args", {})
+        reason = parsed.get("reason", "")
 
-        print(f"[Planner] 下一步: {result.action}({result.args}) - {result.reason}")
-        return {"current_task": result.model_dump()}
+        # 校验 action 合法性
+        if action_name not in _VALID_ACTIONS:
+            action_name = _fallback_action(state)
+            args = _default_args(action_name, state)
+            reason = f"LLM 输出动作无效，回退选择 {action_name}"
+
+        print(f"[Planner] 下一步: {action_name}({args}) - {reason}")
+        return {"current_task": {"action": action_name, "args": args, "reason": reason}}
 
     return planner_node
 

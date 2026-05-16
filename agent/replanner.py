@@ -1,23 +1,42 @@
 """复盘者节点 —— 检查执行结果，决定继续还是结束。"""
 
-from pydantic import BaseModel, Field
+import json
+import re
 
 from agent.state import AgentState
 from agent.prompt import build_replanner_prompt
 from core.llm import get_llm
 
 
-class ReplanDecision(BaseModel):
-    """复盘后的决策"""
-    response: str = Field(description="如果全部完成，填最终报告摘要；否则留空字符串")
-    analysis: str = Field(description="对当前进度的分析，包括是否需要重试失败用例")
+def _parse_llm_json(text: str) -> dict:
+    """从 LLM 输出中提取 JSON，兼容多种格式。"""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return {}
 
 
 def make_replanner_node(config):
     """创建 replanner 节点（闭包注入 config）。"""
     llm = get_llm(config.model_name)
     system_prompt = build_replanner_prompt(max_retries=config.max_retries)
-    structured_llm = llm.with_structured_output(ReplanDecision)
 
     def replanner_node(state: AgentState) -> dict:
         # 如果 response 已有值（如 generate_report 已写入），直接透传
@@ -65,18 +84,22 @@ def make_replanner_node(config):
 ## 当前报告状态
 {state.get('response', '未生成')}
 
-请分析当前进度，判断是否所有工作已完成。如果全部完成则填写 response，否则留空让 planner 继续。"""
+请分析当前进度，判断是否所有工作已完成。必须严格按以下 JSON 格式输出，不要输出其他内容：
+{{"response": "如果全部完成则填写报告摘要，否则留空字符串", "analysis": "对当前进度的分析"}}"""
 
-        result = structured_llm.invoke([
+        response = llm.invoke([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ])
 
-        response = result.response or ""
-        print(f"[Replanner] {result.analysis}")
-        if response:
-            print(f"[Replanner] 流程结束: {response}")
+        parsed = _parse_llm_json(response.content)
+        result_response = parsed.get("response", "")
+        analysis = parsed.get("analysis", "")
 
-        return {"response": response}
+        print(f"[Replanner] {analysis}")
+        if result_response:
+            print(f"[Replanner] 流程结束: {result_response}")
+
+        return {"response": result_response}
 
     return replanner_node

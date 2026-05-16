@@ -158,6 +158,9 @@ pip install -r requirements.txt
 
 # 安装 Playwright 浏览器（必须）
 playwright install chromium
+
+# 如果上面的命令网络超时，使用国内镜像：
+PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright playwright install chromium
 ```
 
 ### 2. 配置 API Key
@@ -191,6 +194,50 @@ python main.py --url https://demo.4gaboards.com/ --model deepseek-chat
 
 # 查看帮助
 python main.py --help
+```
+
+## 常见问题
+
+### Q: 访问 demo.4gaboards.com 超时怎么办？
+
+`demo.4gaboards.com` 是一个 **React SPA（单页应用）**，它的 HTML 只包含一个空的 `<div id="root">` 和一个 `defer` 加载的 JS 脚本。使用 Playwright 默认的 `wait_until="load"` 或 `wait_until="domcontentloaded"` 会导致超时，因为页面在等待所有资源加载完成。
+
+**解决方案**（已通过 legacy 代码验证）：
+
+1. **导航时用 `wait_until="commit"`**：只等 HTTP 响应头返回，不等资源加载
+2. **手动执行 React 脚本**：检测 `<script src="main.xxx.js">` 并主动 fetch + eval
+3. **强制字体加载状态**：`document.fonts.status = 'loaded'`，防止字体加载阻塞截图
+4. **适当等待**：React 渲染需要时间，导航后等 2-3 秒再操作
+
+```python
+# 关键代码（参考 legacy/task2_agent/executor.py）
+
+# 1. 用 commit 代替 load/domcontentloaded
+page.goto(url, wait_until="commit", timeout=60000)
+
+# 2. 手动执行 React 应用的 JS 脚本
+script_url = page.evaluate("""
+    () => {
+        const scripts = Array.from(document.scripts);
+        const mainScript = scripts.find(s => s.src && s.src.includes('main.'));
+        return mainScript ? mainScript.src : null;
+    }
+""")
+if script_url:
+    page.evaluate(f"fetch('{script_url}').then(r=>r.text()).then(t=>eval(t))")
+
+# 3. 等待 React 渲染 + 强制字体加载
+time.sleep(2)
+page.evaluate("document.fonts.status='loaded'; document.fonts.ready=Promise.resolve();")
+```
+
+如果组员 B 在实现 `execute()` 时遇到 SPA 页面白屏或超时，请参考上述方案或直接查看 `legacy/task2_agent/executor.py` 中的 `_navigate_to()` 和 `_execute_react_app()` 函数。
+
+### Q: Playwright install 下载超时？
+
+```bash
+# 使用国内镜像
+PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright playwright install chromium
 ```
 
 ## 项目结构
