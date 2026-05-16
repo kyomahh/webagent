@@ -1,99 +1,123 @@
-"""ReAct Agent 系统提示词 —— 引导 LLM 按推荐工作流自主决策。"""
+"""Plan-Execute-Verify Agent 提示词 —— planner 和 replanner 的提示词模板。"""
 
 
-def build_system_prompt(
+# ── 可用动作清单 ──
+
+AVAILABLE_ACTIONS = [
+    {
+        "action": "crawl_manual",
+        "description": "爬取远程用户手册文档",
+        "args": {"url": "手册网站 URL"},
+    },
+    {
+        "action": "load_local_manual",
+        "description": "从本地目录加载手册文档",
+        "args": {"directory": "本地手册目录路径"},
+    },
+    {
+        "action": "build_knowledge_base",
+        "description": "构建 RAG 向量知识库（基于已有文档）",
+        "args": {"persist_dir": "向量库持久化目录"},
+    },
+    {
+        "action": "extract_features",
+        "description": "从知识库中提取功能点",
+        "args": {"vector_store_path": "向量库路径"},
+    },
+    {
+        "action": "generate_scenarios",
+        "description": "根据功能点生成测试用例",
+        "args": {"vector_store_path": "向量库路径"},
+    },
+    {
+        "action": "plan_and_execute",
+        "description": "规划并通过 Playwright 执行指定测试用例",
+        "args": {"scenario_id": "测试用例 ID"},
+    },
+    {
+        "action": "verify_results",
+        "description": "验证指定测试用例的执行结果",
+        "args": {"scenario_id": "测试用例 ID"},
+    },
+    {
+        "action": "generate_report",
+        "description": "生成最终可视化报告",
+        "args": {},
+    },
+]
+
+
+def _format_actions() -> str:
+    lines = []
+    for a in AVAILABLE_ACTIONS:
+        args_desc = ", ".join(f'{k}: {v}' for k, v in a["args"].items()) or "无参数"
+        lines.append(f'  - {a["action"]}: {a["description"]} (参数: {args_desc})')
+    return "\n".join(lines)
+
+
+def build_planner_prompt(
     target_url: str,
     manual_url: str | None = None,
     manual_dir: str | None = None,
     chroma_dir: str = "chroma_db",
     max_retries: int = 2,
 ) -> str:
-    """构建系统提示词。
+    """构建 planner 提示词。"""
 
-    Args:
-        target_url: 目标网站 URL
-        manual_url: 远程手册 URL（可选）
-        manual_dir: 本地手册目录（可选）
-        chroma_dir: 向量库持久化目录
-        max_retries: 最大重试次数
-    """
-    # 构建手册来源信息与第一步引导
+    # 构建手册来源信息
     if manual_url:
-        manual_info = f"- 远程手册 URL: {manual_url}"
-        manual_step = (
-            "### 第一步：获取手册文档\n"
-            f"已知远程手册 URL，直接调用 crawl_manual(url=\"{manual_url}\") 爬取。\n"
-        )
+        manual_info = f"远程手册 URL: {manual_url}（第一步应使用 crawl_manual）"
     elif manual_dir:
-        manual_info = f"- 本地手册目录: {manual_dir}"
-        manual_step = (
-            "### 第一步：获取手册文档\n"
-            f"已知本地手册目录，直接调用 load_local_manual(directory=\"{manual_dir}\") 加载。\n"
-        )
+        manual_info = f"本地手册目录: {manual_dir}（第一步应使用 load_local_manual）"
     else:
-        manual_info = "- 手册来源未知，需要你自行判断并查找"
-        manual_step = (
-            "### 第一步：判断是否存在用户手册并获取\n"
-            "你需要自己判断目标网站是否存在用户手册。请按以下步骤操作：\n\n"
-            "1. 根据目标网站 URL 推测可能的手册地址。常见模式包括：\n"
-            "   - 将目标 URL 的域名前缀改为 docs（如 https://demo.example.com/ → https://docs.example.com/）\n"
-            "   - 在目标 URL 后追加路径（如 /docs、/help、/manual、/guide、/documentation、/wiki）\n"
-            "2. 使用 crawl_manual(url=\"你猜测的URL\") 尝试爬取\n"
-            "3. 如果成功获取到文档，继续后续步骤\n"
-            "4. 如果第一个 URL 失败，可以再尝试其他可能的 URL（最多 2-3 次）\n"
-            "5. 如果所有尝试都失败，说明该网站可能没有公开手册，直接进入第二步（跳过手册），"
-            "后续工具会基于通用知识生成测试用例\n"
-        )
+        manual_info = "手册来源未知，需要判断目标网站是否存在用户手册并尝试获取"
 
-    return f"""你是一个自动化 Web 测试专家。你的任务是对目标网站进行全面的自动化测试。
+    return f"""你是一个自动化 Web 测试的规划者。你的任务是分析当前状态，决定下一步要执行的动作。
 
 ## 目标信息
 - 目标网站: {target_url}
 - 向量库目录: {chroma_dir}
 - 最大重试次数: {max_retries}
-{manual_info}
+- 手册来源: {manual_info}
 
-## 推荐工作流
+## 可用动作
+{_format_actions()}
 
-请按以下步骤依次调用工具完成任务：
+## 典型工作流顺序
+1. 获取手册文档: crawl_manual 或 load_local_manual
+2. 构建知识库: build_knowledge_base
+3. 提取功能点: extract_features
+4. 生成测试用例: generate_scenarios
+5. 对每个测试用例依次: plan_and_execute → verify_results
+6. 全部完成后: generate_report
 
-{manual_step}
-### 第二步：构建知识库
-调用 build_knowledge_base(persist_dir="{chroma_dir}") 构建向量知识库。
-注意：此步骤会自动使用第一步获取的文档，无需传入文档参数。如果第一步未获取到文档，此步骤将使用空数据。
+## 决策规则
+- 根据当前数据状态判断下一步动作
+- 如果文档为空且未尝试获取手册，先获取手册
+- 如果已有文档但未构建知识库，先构建知识库
+- 如果已有功能点但未生成测试用例，先生成测试用例
+- 对每个测试用例逐一执行 plan_and_execute，然后 verify_results
+- 如果验证失败，可以对同一 scenario_id 重新执行 plan_and_execute（最多重试 {max_retries} 次）
+- 全部测试用例执行并验证完毕后，调用 generate_report
+- 每次只输出一个动作
+- args 中使用具体值，不要使用占位符"""
 
-### 第三步：提取功能点
-调用 extract_features(vector_store_path="{chroma_dir}") 从知识库中提取功能点。
 
-### 第四步：生成测试用例
-调用 generate_scenarios(vector_store_path="{chroma_dir}") 生成测试用例。
-注意：此步骤会自动使用第三步提取的功能点，无需传入功能点参数。
+def build_replanner_prompt(max_retries: int = 2) -> str:
+    """构建 replanner 提示词。"""
+    return f"""你是一个自动化 Web 测试的复盘者。你的任务是检查执行结果，判断是否所有工作已完成。
 
-### 第五步：规划并通过 Playwright 执行测试
-测试将通过 Playwright 驱动浏览器自动执行（点击、输入、导航、截图等）。
-对第四步返回的每个 scenario_id，依次：
-1. 调用 plan_execution(scenario_id="xxx") 规划执行步骤（navigate/click/type/select/wait/screenshot）
-2. 调用 execute_plan(scenario_id="xxx") 启动浏览器自动执行测试
+## 决策规则
+- 如果报告已生成（response 非空），或所有测试用例已执行并验证完毕，则在 response 中填写最终报告摘要
+- 如果还有未完成的工作（如还有测试用例未执行/验证），则将 response 留空，让 planner 继续规划
+- 在 analysis 中简要分析当前进度和执行结果
 
-### 第六步：验证结果
-对每个 scenario_id 调用 verify_results(scenario_id="xxx") 验证执行结果是否符合预期。
-此步骤会将测试用例的 expectations（预期状态）与实际执行结果对比，判断测试是否通过。
+## 重试策略
+- 如果某个测试用例验证失败，planner 可以重新对该用例执行 plan_and_execute（重新规划并执行）
+- 最多重试 {max_retries} 次失败用例，超过后跳过继续下一个
+- 如果大部分用例已通过，即使有少量失败也可以进入 generate_report
 
-### 第七步：处理失败用例
-如果第六步中有用例验证失败，且当前重试次数未达上限（{max_retries} 次）：
-1. 重新调用 plan_execution(scenario_id="失败的id") 重新规划
-2. 调用 execute_plan(scenario_id="失败的id") 重新执行
-3. 再次调用 verify_results(scenario_id="失败的id") 验证
-如果全部通过或已达重试上限，进入第八步。
-
-### 第八步：生成报告
-所有用例验证完毕后，调用 generate_report() 生成最终报告。
-
-## 重要规则
-- 严格按照工作流顺序调用工具，不要跳过步骤
-- 每次只调用一个工具，等待结果后再决定下一步
-- 如果某步返回错误或警告，分析原因并尝试修复
-- 最终必须调用 generate_report() 生成报告
-- scenario_id 从 generate_scenarios 的返回结果中获取
-- vector_store_path 统一使用 "{chroma_dir}"
-"""
+## 判断完成的标准
+- response 非空表示整个流程结束
+- 如果 generate_report 已执行成功，response 应包含报告路径信息
+- 如果中间步骤失败但仍可继续，response 留空让 planner 调整策略"""

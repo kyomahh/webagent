@@ -1,13 +1,18 @@
-"""ReAct Agent 构建 —— 使用 create_react_agent 让 LLM 自主决策工具调用。"""
+"""Plan-Execute-Verify Agent 构建 —— StateGraph 手动构建三节点循环。"""
 
-from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, START, END
 
-from agent.prompt import build_system_prompt
-from core.llm import get_llm
-from tools.rag_tool import RagToolInterface, DataCache, make_rag_tools
-from tools.execution_tool import ExecutionToolInterface, make_execution_tools
-from tools.verification_tool import VerificationToolInterface, make_verification_tools
+from agent.state import AgentState
+from agent.planner import make_planner_node
+from agent.executor import make_executor_node
+from agent.replanner import make_replanner_node
+from tools.rag_tool import RagToolInterface
+from tools.execution_tool import ExecutionToolInterface
+from tools.verification_tool import VerificationToolInterface
 from core.config import AgentConfig
+
+
+_MAX_ITERATIONS = 30
 
 
 def build_agent_graph(
@@ -16,7 +21,7 @@ def build_agent_graph(
     verification_tool: VerificationToolInterface,
     config: AgentConfig,
 ):
-    """构建 ReAct Agent，让 LLM 自主决定调用哪个工具。
+    """构建 Plan-Execute-Verify Agent 图。
 
     Args:
         rag_tool: 数据与RAG模块实现
@@ -25,27 +30,31 @@ def build_agent_graph(
         config: Agent 配置
 
     Returns:
-        编译后的 ReAct Agent，可调用 .invoke(initial_state)
+        编译后的 StateGraph，可调用 .invoke(initial_state)
     """
-    llm = get_llm(config.model_name)
+    planner_node = make_planner_node(config)
+    executor_node = make_executor_node(rag_tool, execution_tool, verification_tool, config)
+    replanner_node = make_replanner_node(config)
 
-    # 共享数据缓存，跨工具模块传递数据
-    cache = DataCache()
+    workflow = StateGraph(AgentState)
 
-    all_tools = (
-        make_rag_tools(rag_tool, cache)
-        + make_execution_tools(execution_tool, config.target_url, cache,
-                               output_dir=config.output_dir,
-                               headless=config.headless)
-        + make_verification_tools(verification_tool, cache)
-    )
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("executor", executor_node)
+    workflow.add_node("replanner", replanner_node)
 
-    prompt = build_system_prompt(
-        target_url=config.target_url,
-        manual_url=config.manual_url,
-        manual_dir=config.manual_dir,
-        chroma_dir=config.chroma_dir,
-        max_retries=config.max_retries,
-    )
+    workflow.add_edge(START, "planner")
+    workflow.add_edge("planner", "executor")
+    workflow.add_edge("executor", "replanner")
 
-    return create_react_agent(llm, all_tools, prompt=prompt)
+    def should_end(state):
+        if state.get("response"):
+            return END
+        # 安全阀：超过最大迭代次数时强制结束
+        if len(state.get("past_steps", [])) >= _MAX_ITERATIONS:
+            print(f"[Graph] 已达到最大迭代次数 {_MAX_ITERATIONS}，强制结束")
+            return END
+        return "planner"
+
+    workflow.add_conditional_edges("replanner", should_end)
+
+    return workflow.compile()

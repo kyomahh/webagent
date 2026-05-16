@@ -118,10 +118,10 @@ def main():
     print(f"  最大重试: {config.max_retries}")
     print("=" * 60)
 
-    # 构建 ReAct Agent
+    # 构建 Plan-Execute-Verify Agent
     graph = build_agent_graph(rag_tool, execution_tool, verification_tool, config)
 
-    # 构建初始用户消息
+    # 构建初始输入
     manual_desc = ""
     if args.manual:
         manual_desc = f"远程手册 URL: {args.manual}"
@@ -130,12 +130,11 @@ def main():
     else:
         manual_desc = "未指定手册来源，请自行判断目标网站是否存在用户手册并尝试获取"
 
-    initial_message = (
+    initial_input = (
         f"请对目标网站 {config.target_url} 进行自动化测试。"
         f"手册来源: {manual_desc}。"
         f"向量库目录: {config.chroma_dir}。"
         f"最大重试次数: {config.max_retries}。"
-        f"请按推荐工作流依次调用工具完成测试。"
     )
 
     # 执行
@@ -145,19 +144,25 @@ def main():
         "manual_dir": args.manual_dir,
         "chroma_dir": config.chroma_dir,
         "max_retries": config.max_retries,
-        "retry_count": 0,
-        "messages": [("user", initial_message)],
+        "input": initial_input,
+        "current_task": {},
+        "past_steps": [],
+        "response": "",
+        "documents": [],
+        "features": [],
+        "test_cases": [],
+        "execution_plans": {},
+        "execution_results": {},
+        "execution_memory": {},
+        "verification_results": {},
     })
 
     print()
     print("=" * 60)
     print("执行完成!")
-    # 从最后的消息中提取报告信息
-    for msg in reversed(result.get("messages", [])):
-        content = msg.content if hasattr(msg, "content") else str(msg)
-        if "报告已生成" in content:
-            print(f"  {content}")
-            break
+    response = result.get("response", "")
+    if response:
+        print(f"  {response}")
     print("=" * 60)
 
 
