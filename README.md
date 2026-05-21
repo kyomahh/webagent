@@ -86,10 +86,12 @@ planner 输出 current_task → executor 读取并执行 → 写入数据字段 
 ```
 运行 python main.py（不带 --stub）
   │
+  ├─ main.py 创建共享浏览器会话 BrowserSession（空壳，不启动浏览器）
+  │
   ├─ main.py 从 tools/impl/__init__.py 加载组员实现
-  │    rag_tool = get_rag_tool(config)              # → 你的 MyRagTool 实例
-  │    execution_tool = get_execution_tool(config)   # → 你的 MyExecutionTool 实例
-  │    verification_tool = get_verification_tool(config)  # → 你的 MyVerificationTool 实例
+  │    rag_tool = get_rag_tool(config)                       # → 你的 MyRagTool 实例
+  │    execution_tool = get_execution_tool(config, session)  # → 你的 MyExecutionTool 实例
+  │    verification_tool = get_verification_tool(config, session)  # → 你的 MyVerificationTool 实例
   │
   ├─ main.py 传给 build_agent_graph()
   │    └─ graph.py 构建三节点 StateGraph
@@ -103,6 +105,8 @@ planner 输出 current_task → executor 读取并执行 → 写入数据字段 
             "verify_results"  → verify_tool.verify(tc, results, mem)
             "generate_report" → verify_tool.visualize(state)
 ```
+
+**BrowserSession 共享浏览器会话**：执行模块和验证模块共用同一个 Playwright Page，确保验证时可以访问执行后的页面状态。详见 [共享浏览器会话](#共享浏览器会话browser-session)。
 
 **关键点**：
 - executor 直接调用你的接口方法（不通过 `@tool` 包装），方法签名和返回格式完全不变
@@ -132,6 +136,34 @@ planner 输出 current_task → executor 读取并执行 → 写入数据字段 
 | 数据与RAG模块 | `tools/rag_tool.py` | 爬取手册、构建知识库、提取功能点、生成测试用例 |
 | 执行与交互模块 | `tools/execution_tool.py` | 规划执行步骤、基于Playwright执行测试 |
 | 验证与可视化模块 | `tools/verification_tool.py` | 验证测试结果、生成可视化报告 |
+
+### 共享浏览器会话（Browser Session）
+
+执行模块和验证模块需要共用同一个 Playwright Page，这样验证模块可以在执行后的页面上做实时检查（检查元素、截图对比等）。框架通过 `core/browser.py` 中的 `BrowserSession` 实现：
+
+```
+BrowserSession（空壳，不启动浏览器）
+  │
+  ├── 执行模块调用 session.ensure_page(headless)
+  │     → 懒启动：第一次调用时才启动浏览器，创建 page
+  │     → 后续调用返回同一个 page
+  │     → 不要关闭浏览器！验证模块还要用
+  │
+  ├── 验证模块通过 session.page 获取同一个 page
+  │     page = self.session.page
+  │     if page and not page.is_closed():
+  │         current_url = page.url       # 检查当前页面
+  │         body_text = page.locator("body").inner_text()
+  │
+  └── main.py 流程结束后统一清理
+        session.close()  # 在 finally 中调用，确保浏览器资源释放
+```
+
+**组员 B（执行模块）**：构造函数接收 `session`，在 `execute()` 中调用 `self.session.ensure_page(headless)` 获取 page，**不要自己创建/销毁浏览器**。
+
+**组员 C（验证模块）**：构造函数接收 `session`，在 `verify()` 中通过 `self.session.page` 获取执行模块操作过的同一个 page，做实时页面验证。
+
+**组员 A（RAG 模块）**：不涉及浏览器，无需使用 session。
 
 ### 工作流
 
@@ -249,7 +281,8 @@ webagent/
 ├── .env                     # 环境变量（API Key）
 ├── core/                    # 共享基础设施
 │   ├── config.py            #   配置管理 (AgentConfig)
-│   └── llm.py               #   LangChain 统一 LLM 接口
+│   ├── llm.py               #   LangChain 统一 LLM 接口
+│   └── browser.py           #   共享浏览器会话 (BrowserSession)
 ├── agent/                   # Plan-Execute-Verify Agent 核心
 │   ├── state.py             #   AgentState 定义（配置 + 数据缓存 + 调度字段）
 │   ├── prompt.py            #   planner/replanner 提示词 + 可用动作清单
@@ -623,14 +656,15 @@ planner 决定 action: "plan_and_execute" (合并了规划+执行)
 
 from tools.execution_tool import ExecutionToolInterface
 from core.config import AgentConfig
+from core.browser import BrowserSession
 
 
 class MyExecutionTool(ExecutionToolInterface):
     """继承 ExecutionToolInterface，实现 2 个抽象方法。"""
 
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, session: BrowserSession):
         self.config = config
-        # 可以在这里初始化你需要的资源
+        self.session = session  # 共享浏览器会话，用于获取/创建 page
 
     # ──────────────────────────────────────────────
     # 方法 1: 规划执行步骤
@@ -732,11 +766,9 @@ class MyExecutionTool(ExecutionToolInterface):
                headless = config.get("headless", False)
                output_dir = config.get("output_dir", "output")
 
-            2. 启动 Playwright:
-               from playwright.sync_api import sync_playwright
-               with sync_playwright() as p:
-                   browser = p.chromium.launch(headless=headless)
-                   page = browser.new_page()
+            2. 通过共享浏览器会话获取 page（懒启动，首次调用时才打开浏览器）:
+               page = self.session.ensure_page(headless=headless)
+               # 注意：不要关闭浏览器，验证模块会继续使用同一个 page
 
             3. 按 plan 逐步执行，根据 action_type 调用对应 Playwright API:
                - navigate → page.goto(target + path)
@@ -748,7 +780,7 @@ class MyExecutionTool(ExecutionToolInterface):
 
             4. 每步执行后截图，记录成功/失败
             5. 如果元素找不到，尝试用 fallback_text 定位
-            6. 关闭浏览器，返回结果
+            6. 返回结果（不要关闭浏览器，验证模块会继续使用同一个 page）
 
         可参考 legacy/task2_agent/smart_executor.py 和 smart_element_finder.py
         """
@@ -764,14 +796,12 @@ class MyExecutionTool(ExecutionToolInterface):
         results = []
         screenshots = []
 
-        # TODO: 启动 Playwright，按 plan 逐步执行
-        # from playwright.sync_api import sync_playwright
-        # with sync_playwright() as p:
-        #     browser = p.chromium.launch(headless=headless)
-        #     page = browser.new_page()
-        #     for step in plan:
-        #         ... 执行每个步骤 ...
-        #     browser.close()
+        # 通过共享会话获取 page（不要自己创建/销毁浏览器）
+        page = self.session.ensure_page(headless=headless)
+
+        # TODO: 按 plan 逐步执行
+        # for step in plan:
+        #     ... 执行每个步骤 ...
 
         return {
             "results": results,
@@ -826,14 +856,15 @@ planner 决定 action: "generate_report"
 
 from tools.verification_tool import VerificationToolInterface
 from core.config import AgentConfig
+from core.browser import BrowserSession
 
 
 class MyVerificationTool(VerificationToolInterface):
     """继承 VerificationToolInterface，实现 2 个抽象方法。"""
 
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, session: BrowserSession):
         self.config = config
-        # 可以在这里初始化你需要的资源
+        self.session = session  # 共享浏览器会话，可访问执行模块操作过的 page
 
     # ──────────────────────────────────────────────
     # 方法 1: 验证测试结果
@@ -874,7 +905,13 @@ class MyVerificationTool(VerificationToolInterface):
                - 分析 execution_results 中每步的 result 描述
                - 分析 execution_memory 中的截图（如有）
                - 判断是否满足 expectations 描述的预期状态
-            3. 返回 passed=True/False 并给出 reason
+            3. 页面实时验证: 通过共享的 page 检查当前页面状态
+               page = self.session.page
+               if page and not page.is_closed():
+                   current_url = page.url
+                   body_text = page.locator("body").inner_text()
+                   # 可以检查元素是否存在、文本是否匹配等
+            4. 返回 passed=True/False 并给出 reason
 
         可参考 legacy/task2_agent/verifier.py
         """
@@ -988,10 +1025,10 @@ def get_rag_tool(config):
 在 `tools/impl/__init__.py` 中添加：
 
 ```python
-def get_execution_tool(config):
+def get_execution_tool(config, session):
     """组员 B 注册处 —— 导入你的类，创建实例返回。"""
     from tools.impl.execution_impl import MyExecutionTool     # ← 改成你的类名
-    return MyExecutionTool(config)
+    return MyExecutionTool(config, session)
 ```
 
 #### 组员 C：注册验证模块
@@ -1003,10 +1040,10 @@ def get_execution_tool(config):
 在 `tools/impl/__init__.py` 中添加：
 
 ```python
-def get_verification_tool(config):
+def get_verification_tool(config, session):
     """组员 C 注册处 —— 导入你的类，创建实例返回。"""
     from tools.impl.verification_impl import MyVerificationTool     # ← 改成你的类名
-    return MyVerificationTool(config)
+    return MyVerificationTool(config, session)
 ```
 
 #### 完整的 `tools/impl/__init__.py`（三人写完后长这样）
@@ -1020,14 +1057,14 @@ def get_rag_tool(config):
     return MyRagTool(config)
 
 
-def get_execution_tool(config):
+def get_execution_tool(config, session):
     from tools.impl.execution_impl import MyExecutionTool
-    return MyExecutionTool(config)
+    return MyExecutionTool(config, session)
 
 
-def get_verification_tool(config):
+def get_verification_tool(config, session):
     from tools.impl.verification_impl import MyVerificationTool
-    return MyVerificationTool(config)
+    return MyVerificationTool(config, session)
 ```
 
 #### 注册汇总表
@@ -1035,8 +1072,8 @@ def get_verification_tool(config):
 | 组员 | 你创建的文件 | 你的类名 | 你要注册的函数 | 继承的接口 |
 |------|------------|---------|--------------|-----------|
 | 组员 A | `tools/impl/rag_impl.py` | `MyRagTool` | `get_rag_tool(config)` | `RagToolInterface` |
-| 组员 B | `tools/impl/execution_impl.py` | `MyExecutionTool` | `get_execution_tool(config)` | `ExecutionToolInterface` |
-| 组员 C | `tools/impl/verification_impl.py` | `MyVerificationTool` | `get_verification_tool(config)` | `VerificationToolInterface` |
+| 组员 B | `tools/impl/execution_impl.py` | `MyExecutionTool` | `get_execution_tool(config, session)` | `ExecutionToolInterface` |
+| 组员 C | `tools/impl/verification_impl.py` | `MyVerificationTool` | `get_verification_tool(config, session)` | `VerificationToolInterface` |
 
 **注意事项**：
 - 类名可以自定义（不一定要叫 `MyXxxTool`），但注册函数名必须固定（`get_rag_tool` 等），因为 `main.py` 按这个名字调用

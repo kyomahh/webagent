@@ -87,6 +87,11 @@ def main():
     config.max_retries = args.max_retries
     config.headless = args.headless
 
+    # 创建共享浏览器会话（空壳，不启动浏览器）
+    # 执行模块调用 ensure_page() 时才懒启动，验证模块通过 session.page 获取同一个 page
+    from core.browser import BrowserSession
+    session = BrowserSession()
+
     # 选择 Tool 实现
     if args.stub:
         from tools.stub import StubRagTool, StubExecutionTool, StubVerificationTool
@@ -98,8 +103,8 @@ def main():
         try:
             from tools.impl import get_rag_tool, get_execution_tool, get_verification_tool
             rag_tool = get_rag_tool(config)
-            execution_tool = get_execution_tool(config)
-            verification_tool = get_verification_tool(config)
+            execution_tool = get_execution_tool(config, session)
+            verification_tool = get_verification_tool(config, session)
         except ImportError:
             print("错误: 真实模块未实现。请使用 --stub 模式测试，或在 tools/impl/ 中实现模块。")
             print("  参考接口定义: tools/rag_tool.py, tools/execution_tool.py, tools/verification_tool.py")
@@ -138,32 +143,36 @@ def main():
     )
 
     # 执行
-    result = graph.invoke({
-        "target_url": config.target_url,
-        "manual_url": args.manual,
-        "manual_dir": args.manual_dir,
-        "chroma_dir": config.chroma_dir,
-        "max_retries": config.max_retries,
-        "input": initial_input,
-        "current_task": {},
-        "past_steps": [],
-        "response": "",
-        "documents": [],
-        "features": [],
-        "test_cases": [],
-        "execution_plans": {},
-        "execution_results": {},
-        "execution_memory": {},
-        "verification_results": {},
-    })
+    try:
+        result = graph.invoke({
+            "target_url": config.target_url,
+            "manual_url": args.manual,
+            "manual_dir": args.manual_dir,
+            "chroma_dir": config.chroma_dir,
+            "max_retries": config.max_retries,
+            "input": initial_input,
+            "current_task": {},
+            "past_steps": [],
+            "response": "",
+            "documents": [],
+            "features": [],
+            "test_cases": [],
+            "execution_plans": {},
+            "execution_results": {},
+            "execution_memory": {},
+            "verification_results": {},
+        })
 
-    print()
-    print("=" * 60)
-    print("执行完成!")
-    response = result.get("response", "")
-    if response:
-        print(f"  {response}")
-    print("=" * 60)
+        print()
+        print("=" * 60)
+        print("执行完成!")
+        response = result.get("response", "")
+        if response:
+            print(f"  {response}")
+        print("=" * 60)
+    finally:
+        # 统一清理浏览器资源
+        session.close()
 
 
 if __name__ == "__main__":

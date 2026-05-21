@@ -6,13 +6,13 @@
     3. main.py 会自动通过这里找到你的实现
 
 三人各自的注册信息：
-    ┌───────┬───────────────────────────────┬─────────────────┬───────────────────────┐
-    │ 组员  │ 你创建的文件                   │ 你的类名         │ 你要写的注册函数        │
-    ├───────┼───────────────────────────────┼─────────────────┼───────────────────────┤
-    │ 组员A │ tools/impl/rag_impl.py        │ MyRagTool       │ get_rag_tool(config)  │
-    │ 组员B │ tools/impl/execution_impl.py  │ MyExecutionTool │ get_execution_tool()   │
-    │ 组员C │ tools/impl/verification_impl.py│ MyVerificationTool│ get_verification_tool()│
-    └───────┴───────────────────────────────┴─────────────────┴───────────────────────┘
+    ┌───────┬───────────────────────────────┬─────────────────┬───────────────────────────────┐
+    │ 组员  │ 你创建的文件                   │ 你的类名         │ 你要写的注册函数                │
+    ├───────┼───────────────────────────────┼─────────────────┼───────────────────────────────┤
+    │ 组员A │ tools/impl/rag_impl.py        │ MyRagTool       │ get_rag_tool(config)          │
+    │ 组员B │ tools/impl/execution_impl.py  │ MyExecutionTool │ get_execution_tool(config, session)  │
+    │ 组员C │ tools/impl/verification_impl.py│ MyVerificationTool│ get_verification_tool(config, session)│
+    └───────┴───────────────────────────────┴─────────────────┴───────────────────────────────┘
 
 注意：
     - 函数名必须固定（get_rag_tool / get_execution_tool / get_verification_tool）
@@ -20,6 +20,8 @@
     - 类名可以自定义，只要在函数里改成你的类名就行
     - 使用 from ... import 延迟导入，避免循环依赖
 """
+
+from __future__ import annotations
 
 from core.config import AgentConfig
 
@@ -49,9 +51,9 @@ from core.config import AgentConfig
 #
 # 示例（组员 B 完成实现后，取消下面的注释并改成你的类名）：
 #
-# def get_execution_tool(config: AgentConfig):
+# def get_execution_tool(config: AgentConfig, session: BrowserSession):
 #     from tools.impl.execution_impl import MyExecutionTool     # ← 改成你的类名
-#     return MyExecutionTool(config)
+#     return MyExecutionTool(config, session)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -64,16 +66,20 @@ from core.config import AgentConfig
 #
 # 示例（组员 C 完成实现后，取消下面的注释并改成你的类名）：
 #
-# def get_verification_tool(config: AgentConfig):
+# def get_verification_tool(config: AgentConfig, session: BrowserSession):
 #     from tools.impl.verification_impl import MyVerificationTool     # ← 改成你的类名
-#     return MyVerificationTool(config)
+#     return MyVerificationTool(config, session)
+
 from typing import Any
 
+from core.browser import BrowserSession
 
-def get_execution_tool(config: Any):
+
+def get_execution_tool(config: Any, session: BrowserSession):
     # 修改点：注册真实执行与交互模块，让 main.py 能加载 PlaywrightExecutionTool。
+    # session: 共享浏览器会话，用于在执行和验证模块间传递同一个 page。
     from tools.impl.execution_impl import PlaywrightExecutionTool
-    return PlaywrightExecutionTool(config)
+    return PlaywrightExecutionTool(config, session)
 
 
 def get_rag_tool(config: Any):
@@ -83,8 +89,8 @@ def get_rag_tool(config: Any):
     return StubRagTool()
 
 
-def get_verification_tool(config: Any):
-    # 临时兼容：如果验证模块还没完成，先复用 stub，保证执行模块可独立测试。
+def get_verification_tool(config: Any, session: BrowserSession):
+    # session: 共享浏览器会话，验证模块通过 session.page 获取执行模块操作过的同一个 page。
     # 后续完成验证后，可替换为：from tools.impl.verification_impl import MyVerificationTool; return MyVerificationTool(config)
     from tools.stub.verification_stub import StubVerificationTool
     return StubVerificationTool()
