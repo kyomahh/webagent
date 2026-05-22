@@ -79,6 +79,7 @@ def get_execution_tool(config: Any, session: BrowserSession):
     # 修改点：注册真实执行与交互模块，让 main.py 能加载 PlaywrightExecutionTool。
     # session: 共享浏览器会话，用于在执行和验证模块间传递同一个 page。
     from tools.impl.execution_impl import PlaywrightExecutionTool
+
     return PlaywrightExecutionTool(config, session)
 
 
@@ -86,11 +87,13 @@ def get_rag_tool(config: Any):
     # 临时兼容：如果 RAG 模块还没完成，先复用 stub，避免 main.py 导入失败。
     # 后续完成 RAG 后，可替换为：from tools.impl.rag_impl import MyRagTool; return MyRagTool(config)
     from tools.stub.rag_stub import StubRagTool
+
     return StubRagTool()
 
 
 def get_verification_tool(config: Any, session: BrowserSession):
-    # session: 共享浏览器会话，验证模块通过 session.page 获取执行模块操作过的同一个 page。
-    # 后续完成验证后，可替换为：from tools.impl.verification_impl import MyVerificationTool; return MyVerificationTool(config)
-    from tools.stub.verification_stub import StubVerificationTool
-    return StubVerificationTool()
+    # session: 共享浏览器会话，验证模块通过 session.page 获取同一个 page。
+    from tools.impl.verification_impl import VerificationAgent
+
+    # 直接把 page 对象传给你的验证类
+    return VerificationAgent(config=config, page=session.page)
