@@ -10,9 +10,8 @@
 import pytest
 
 # ──── 组员修改此处：替换为你的实现 ────
-# from tools.impl.rag_impl import MyRagTool
-# 下面用 stub 作为示例
-from tools.stub.rag_stub import StubRagTool as ImplToTest
+from tools.impl.rag_impl import MyRagTool as ImplToTest
+# from tools.stub.rag_stub import StubRagTool as ImplToTest
 
 from conftest import (
     assert_document_format,

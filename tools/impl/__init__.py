@@ -84,11 +84,8 @@ def get_execution_tool(config: Any, session: BrowserSession):
 
 
 def get_rag_tool(config: Any):
-    # 临时兼容：如果 RAG 模块还没完成，先复用 stub，避免 main.py 导入失败。
-    # 后续完成 RAG 后，可替换为：from tools.impl.rag_impl import MyRagTool; return MyRagTool(config)
-    from tools.stub.rag_stub import StubRagTool
-
-    return StubRagTool()
+    from tools.impl.rag_impl import MyRagTool
+    return MyRagTool(config)
 
 
 def get_verification_tool(config: Any, session: BrowserSession):

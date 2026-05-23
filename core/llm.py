@@ -20,6 +20,11 @@ _MODEL_CONFIGS = {
         "api_key_env": "ZHIPUAI_API_KEY",
         "default_params": {"temperature": 0.1, "max_tokens": 8192},
     },
+    "glm-5.1": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "default_params": {"temperature": 0.1, "max_tokens": 8192},
+    },
     # DeepSeek系列模型
     "deepseek-chat": {
         "base_url": "https://api.deepseek.com/v1",
