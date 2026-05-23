@@ -1,11 +1,12 @@
+# Notifications | 4ga Boards Docs
+
 On this page
-Notifications
 4ga Boards features a comprehensive notifications sytem, consisting of two main modules:
 Notification Center
 and
 Check Activity Log
 Notifications and Notification Center
-â
+​
 You can quickly view notifications by clicking the
 bell
 icon in the top-right corner. This will open a panel on the side. To close it, click anywhere on the board.
@@ -46,25 +47,27 @@ Use the
 double arrow
 icon to change the filter type:
 All
-â shows all results
+– shows all results
 Project
-â notifications for a specific project
+– notifications for a specific project
 Board
-â notifications for a specific board
+– notifications for a specific board
 User
-â notifications related to a user
+– notifications related to a user
 Card
-â notifications related to a card
+– notifications related to a card
 Text/type of activity
-â searches notification text fields (e.g. comment text) or activity type (e.g. typing "taskcreate" will result in showing all task creation notifications)
+– searches notification text fields (e.g. comment text) or activity type (e.g. typing "taskcreate" will result in showing all task creation notifications)
 Open
 ellipsis
 icon to mark all notifications as read/unread, delete all notifications, delete only read notifications. Click on the icon to the left from the
 ellipsis
 to open fullscreen Notification Center, where you can thoroughly examine all notifications.
 Activity Check Log
-â
+​
 In several elements, clicking the
 ellipsis icon
 gives you the option to check activity. This opens the Activity Log popup window.
 The window displays the creation and last update time of the element, along with all activity performed on it. For elements with high activity (e.g. boards), you can scroll through the activity list, down to the very first entry.
+Notifications and Notification Center
+Activity Check Log

@@ -1,15 +1,17 @@
-ðï¸
-4ga Boards Hosting (very easy)
+# Installation | 4ga Boards Docs
+
+4
+ga Boards Hosting (very easy)
 This is the most hassle-free method of installing 4ga Boards.
-ðï¸
+🗃
 Docker Compose (Easy)
 4 items
-ðï¸
+🗃
 Kubernetes (Hard)
 5 items
-ðï¸
+🗃
 TrueNAS (Hard)
 3 items
-ðï¸
-Manual (ð¤¡)
+🗃
+Manual (🤡)
 4 items

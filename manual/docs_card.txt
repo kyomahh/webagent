@@ -1,9 +1,10 @@
+# Card | 4ga Boards Docs
+
 On this page
-Card
 This section shows all of the possible actions that can be performed with a card, including labelling, notifications and extensive tutorial on description text editor.
 Card represents individual task, e.g. "Go buy groceries" or "Fix the wrong button placement".
 Creating, moving and deleting cards
-â
+​
 To create a card you have two options:
 Click on the
 + Add Card
@@ -51,7 +52,7 @@ icon will appear. Click on it to open a card menu and select
 Delete Card
 .
 Card menu
-â
+​
 After clicking the ellipsis menu in the card you will open a card menu. Here you can:
 Edit the name of the card
 Assing members to the card (see Card Options below)
@@ -64,13 +65,13 @@ Copy a link to a card which you can then share with your team
 Check activity on the card (creation, last edit time)
 Delete card
 Card View overview
-â
+​
 When you click on the card, the card view will show up at the right side of your screen. Why not on the centre? The unique feature of 4ga Boards is that you can manipulate the lists and boards while the card view is open.
 It is quite convenient if you want to rearrange your cards while still writing the description, or to simply appraise you beautiful card cover picture. Isn't it beautiful?
 Also, notice that cards have different appearance that is changing with the amount of options and details set.
 In the list view, the card is also opening at the right side, squeezing the table to fit the screen (no worries, it will be back at normal size once you close the card).
 Card options
-â
+​
 The card view is the best way to change all the informations, options and details about your card. If the view gets cluttered, you can hide certain elements (description, tasks, attachments, comments) by clicking on the
 -
 icon next to them. Click the
@@ -177,7 +178,7 @@ You can also check activity by clicking the
 waveform
 symbol.
 Text editor
-â
+​
 In 4ga Boards we are using very powerful markdown editor with unique features (marked by bold text). In the bottom-right corner of text editor box there are three small dots: drag them with a mouse to make the box bigger/smaller. The working view should look like this (notice the yellow text local changes - it shows that the text is still in edit mode and the changes are not yet registered on the server):
 As the text editor is a markdown editor, it follows typical syntax to other editors like this. More detailed information on any of the options of the markdown editor can be found here:
 basic syntax
@@ -248,3 +249,8 @@ to mention user use @(username), e.g.
 Alternatively you can paste links to link commit, commit comment, issue or PR, issue or PR comment, user.
 Special power: if you have read so far, you can use special ability: add invisible comment with:
 <!-- This comment will be invisible so I can say whatever I want -->
+Creating, moving and deleting cards
+Card menu
+Card View overview
+Card options
+Text editor

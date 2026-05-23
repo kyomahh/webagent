@@ -1,4 +1,5 @@
-Installation and creating an account
+# Installation and creating an account | 4ga Boards Docs
+
 If you succesfully deployed 4ga Boards or your organization has already provided you with working one, it is time to create your account. To do this, simply go to the web adress of your 4ga Boards.
 To try out 4ga Boards, you can go and register in the
 demo instance

@@ -1,4 +1,5 @@
-Structure
+# Structure | 4ga Boards Docs
+
 This section aims to present the logical structure of organizing the workflow with 4ga Boards.
 4ga Boards is using a four-level structure to help you maintain even the most complicated projects. Speaking of projects...
 Project

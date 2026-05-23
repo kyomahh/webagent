@@ -1,16 +1,17 @@
+# API | 4ga Boards Docs
+
 On this page
-API
 Description
-â
+​
 API can be used to automate tasks in 4ga Boards either by developers through external calls/scripts or to allow 4ga Boards built-in functionality such as creating cards using email.
 API Clients
-â
+​
 Internal
-â
+​
 Internal API clients are generated (if needed) on app startup and exchanged with 4ga Boards Notifications server to allow creating cards using email.
 For email-to-card functionality mailToken creator is used as a card creator.
 External
-â
+​
 Any user can generate API client to authenticate on it's behalf.
 Permissions are separated into groups: all
 *
@@ -20,7 +21,7 @@ or separate permissions e.g.
 attachments.create
 .
 API Usage Examples
-â
+​
 Creating a card named
 Card Name
 :
@@ -47,3 +48,6 @@ cards.create
 You need to fetch listId using another API call, or just for testing using browser inspect.
 Additional Links:
 API Endpoints
+Description
+API Clients
+API Usage Examples

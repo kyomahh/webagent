@@ -1,0 +1,11 @@
+# Documentation | 4ga Boards Docs
+
+For Users
+Check documentation
+Discover how to use the platform to accomplish your goals efficiently.
+For Admins
+Check documentation
+Manage your team, settings, and workflows with ease.
+For Developers
+Check documentation
+Learn how to self host 4ga Boards on your own servers.

@@ -1,8 +1,9 @@
+# Sidebar | 4ga Boards Docs
+
 On this page
-Sidebar
 All the time while using the 4ga Boards you can use the sidebar. It let's you quickly manage and navigate thorough your projects and boards. Here is how it looks like:
 Some actions you can perform within sidebar:
-â
+​
 You can change sidebar width inside
 personal settings
 .
@@ -20,3 +21,4 @@ If you have appriopriate permissions, the buttons
 and
 + Add board
 will be visible at the bottom of the sidebar.
+Some actions you can perform within sidebar:

@@ -1,16 +1,17 @@
+# Settings | 4ga Boards Docs
+
 On this page
-Settings
 The personal and general settings panel looks like this:
 Profile
-â
+​
 In the profile settings you can add an avatar (from the disc), change your displayed name and add additional informations such as phone and organization name. Remember to click on the
 Save
 button!
 Preferences
-â
+​
 This section lets you customize 4ga Boards to your, well, preferences.
 General
-â
+​
 "Language": Select the language you want to use in 4ga Boards.
 "Theme": Select the color theme of the application. Currently available themes: default (which is used in this documentation), and "GitHub Dark", and even create custom theme! (see pictures below)
 "Theme Shape": Select the shape of the application theme. Choose from default square shape or rounded shape on elements (see picture below)
@@ -24,7 +25,7 @@ If you disable it, the sidebar will be bulkier, which might be useful if you hav
 "Hide Card Modal Activity": Enable to hide activity log (creation and last update time) in card view.
 "Hide Closest Due Date": Hide closest/earliest due date in card modal.
 Notifications
-â
+​
 "Subscribe to my own cards": set if you want to be automatically subscribed to the cards created by you (see
 card
 , card options section).
@@ -34,13 +35,13 @@ card
 "Subscribe to users notifications": set if you want to be automatically subscribed to notifications about other users (change e-mail, username).
 "Subscribe to instance notifications": set if you want to be automatically subscribed to instance-wide notifications.
 Account
-â
+​
 Here you can change your username and/or e-mail adress. For both changes you will need to input your current password.
 Authentication
-â
+​
 Here you can change your current password.
 About
-â
+​
 Section providing information about your current build version, latest available version of 4ga Boards and useful links:
 4ga Boards
 ,
@@ -61,4 +62,11 @@ Facebook
 Privacy Policy
 and
 Terms of Service
-. Here, you can also import the âGetting Startedâ project, which provides an interactive introduction to 4ga Boards features and functionality.
+. Here, you can also import the “Getting Started” project, which provides an interactive introduction to 4ga Boards features and functionality.
+Profile
+Preferences
+General
+Notifications
+Account
+Authentication
+About

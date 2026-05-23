@@ -1,5 +1,6 @@
+# Board | 4ga Boards Docs
+
 On this page
-Board
 The heart of 4ga Boards is, unsuprisingly, a board. Board view is the main view of this app - you will spend here most of your time. Don't worry! It's easy to grasp.
 At first you will see that your project contains no boards - to create them, simply click the
 +Add Board
@@ -8,7 +9,7 @@ If you are joining to an existing project, here is how it should look like:
 If you have set the default view as list view, here is what you will see:
 Notice that selected board is highlighted in the sidebar view (in this case, it is "New Website" from "Marketing" project).
 Creating a new board
-â
+​
 There can be more than one board per project - simply click the
 +Add Board
 button that is located at the top-right corner of the screen to create new one inside the currently opened project. Alternatively you can add board using three-dot sidebar menu of a
@@ -20,10 +21,10 @@ This will open up a pop-up window in which you can name your board, prefill the 
 Currently there are two available templates, simple:
 And kanban:
 Board additional options
-â
+​
 If you want to edit or delete your board, open the ellipsis menu in the sidebar (they will show after you hover over the board name). You can also change the order of the board within the project after clicking and holding the two arrows button that will appear on the left of the board name. If you wish, you can also export your board in .csv format here.
 Board toolbar
-â
+​
 Each board comes with separate toolbar, in which (going from left to right) you can:
 Set up GitHub integration (click GitHub icon),
 See the number of cards after filtering,
@@ -33,7 +34,7 @@ icon, delete or edit permissions of members (click on the appriopriate member ic
 Filter cards (more below the image),
 Change view (Board view/List view)
 Board Filtering
-â
+​
 Board filtering is a powerful tool that let's you quickly find what you are looking for. For even quicker navigation, you can select appriopriate option (explained below) by clicking or using key combination when you are clicked in the
 Filter cards
 type box.
@@ -63,9 +64,14 @@ option is enabled, it will show cards with only the
 exact
 due date. This search returns also the cards with appriopriate subtask due date.
 Board permissions
-â
+​
 Each member of the board can have different permission:
 Project manager: manage boards and add members,
 Editor:  can create and delete tasks and lists,
 Commenter:  can view contents of the board and comment on the cards,
 Viewer: can only view contents of the board.
+Creating a new board
+Board additional options
+Board toolbar
+Board Filtering
+Board permissions

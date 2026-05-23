@@ -1,4 +1,5 @@
-Useful Shortcuts
+# Useful Shortcuts | 4ga Boards Docs
+
 This page presents shortcuts that helps you use 4ga Boards more effectively.
 Ctrl
 +

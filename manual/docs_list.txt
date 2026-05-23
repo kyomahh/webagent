@@ -1,8 +1,9 @@
+# List | 4ga Boards Docs
+
 On this page
-List
 In 4ga Boards, lists are columns on the board representing different stages or categories of the workflow. For example, kanban board template comes with 5 empty lists:
 List navigation
-â
+​
 To move list into different spot on the same board, simply drag and drop it where you want. You can't, however, move a list to different board or project.
 If you have many lists that don't fit in a browser window, you can move around by using
 Shift
@@ -12,7 +13,7 @@ Scroll
 If the list is full of cards, you can scroll through them using mouse scroll (while hovering over the list) or with scrollbar at the right side of the list.
 You can hide/unhide all lists (empty or with cards) by clicking on the little triangle button in the top-left corner of the list (right next to its name). This feature is very handy for decluttering your board view and/or hiding unnecesarry lists. Hidden list will have the number of holded cards displayed on them (see screenshot).
 Creating, editing and deleting the list
-â
+​
 To create a list, click on the
 +add list
 button on the board, write a name and confirm it by clicking on the green
@@ -26,8 +27,11 @@ in the top-right corner of a list. It will open a context menu, in which you can
 Add Card
 you can create a new card at the bottom of the list.
 List in list view
-â
+​
 Lists do not magically disappear when you switch from the board view to the list view. To see which list a card belongs to, refer to the "List" column. You can also move cards between lists here by clicking on it.
 Sorting the lists in this view
 does not
 change its placement in the board view.
+List navigation
+Creating, editing and deleting the list
+List in list view

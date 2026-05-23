@@ -1,36 +1,38 @@
-ðï¸
+# For Users | 4ga Boards Docs
+
+📄️
 Structure Overview
 This section aims to present the logical structure of organizing the workflow with 4ga Boards.
-ðï¸
+📄️
 Project
 Projects are the highest structure of 4ga boards workflow. All of the projects can be accessed from the dashboard view (3) or using the sidebar (2).
-ðï¸
+📄️
 Board: General
 The heart of 4ga Boards is, unsuprisingly, a board. Board view is the main view of this app - you will spend here most of your time. Don't worry! It's easy to grasp.
-ðï¸
+📄️
 Board: Board View
 A classic Kanban board view, with lists and cards.
-ðï¸
+📄️
 Board: List View
-List View is a special view in 4ga Boards that lets you see all your tasks in a convenient to-do list style. Both views are interchangeable â all changes stay in sync, whether you make them in the board or list view.
-ðï¸
+List View is a special view in 4ga Boards that lets you see all your tasks in a convenient to-do list style. Both views are interchangeable — all changes stay in sync, whether you make them in the board or list view.
+📄️
 List
 In 4ga Boards, lists are columns on the board representing different stages or categories of the workflow. For example, kanban board template comes with 5 empty lists:
-ðï¸
+📄️
 Card
 This section shows all of the possible actions that can be performed with a card, including labelling, notifications and extensive tutorial on description text editor.
-ðï¸
+📄️
 Sidebar
 All the time while using the 4ga Boards you can use the sidebar. It let's you quickly manage and navigate thorough your projects and boards. Here is how it looks like:
-ðï¸
+📄️
 Notifications
 4ga Boards features a comprehensive notifications sytem, consisting of two main modules: Notification Center and Check Activity Log
-ðï¸
+📄️
 User Settings
 The personal and general settings panel looks like this:
-ðï¸
+📄️
 Views Description
 1. Dashboard view
-ðï¸
+📄️
 Useful Shortcuts
 This page presents shortcuts that helps you use 4ga Boards more effectively.
