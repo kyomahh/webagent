@@ -50,15 +50,47 @@ def make_replanner_node(config):
         execution_results = state.get("execution_results", {})
         verification_results = state.get("verification_results", {})
 
+        # ── 快速路径：基于规则判断是否完成（避免 LLM 调用）──
+        total_cases = len(test_cases)
+        executed_ids = set(execution_results.keys())
+        verified_ids = set(verification_results.keys())
+
+        # 如果所有测试用例都已执行并验证，流程结束
+        if total_cases > 0 and len(executed_ids) == total_cases and len(verified_ids) == total_cases:
+            passed_ids = {
+                sid for sid, v in verification_results.items()
+                if isinstance(v, dict) and v.get("passed")
+            }
+            failed_ids = verified_ids - passed_ids
+
+            # 生成最终报告摘要（无需 LLM）
+            summary = f"""测试执行完成！
+- 总用例数: {total_cases}
+- 通过: {len(passed_ids)}
+- 失败: {len(failed_ids)}
+- 通过率: {len(passed_ids) * 100 // total_cases if total_cases > 0 else 0}%
+
+失败的用例: {sorted(failed_ids) if failed_ids else '无'}"""
+
+            print(f"[Replanner] {summary}")
+            print(f"[Replanner] 当前进度 {len(verified_ids)}/{total_cases}。所有测试用例已执行并验证完毕。")
+
+            return {"response": summary}
+
+        # 快速路径：还有未执行的用例，继续（无需 LLM）
+        if len(executed_ids) < total_cases:
+            remaining = total_cases - len(executed_ids)
+            print(f"[Replanner] 当前进度 {len(executed_ids)}/{total_cases}。还有 {remaining} 个用例待执行，继续工作。")
+            return {"response": ""}  # response 为空表示继续
+
+        # ── 边界情况：用例已执行但未验证，或其他复杂状态，调用 LLM ──
+
         past_steps = state.get("past_steps", [])
         past_summary = "\n".join(
             f"  - {action}: {result}" for action, result in past_steps
         ) or "  （无）"
 
-        # 统计测试进度
-        total_cases = len(test_cases)
-        executed_ids = set(execution_results.keys())
-        verified_ids = set(verification_results.keys())
+        # 统计测试进度（复用前面计算的值，避免不一致）
         passed_ids = {
             sid for sid, v in verification_results.items()
             if isinstance(v, dict) and v.get("passed")

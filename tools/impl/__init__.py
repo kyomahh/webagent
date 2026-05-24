@@ -89,8 +89,7 @@ def get_rag_tool(config: Any):
 
 
 def get_verification_tool(config: Any, session: BrowserSession):
-    # session: 共享浏览器会话，验证模块通过 session.page 获取同一个 page。
-    from tools.impl.verification_impl import VerificationAgent
+    # session: 共享浏览器会话，验证模块通过 session.page 获取执行模块操作过的同一个 page。
+    from tools.impl.verification_impl import MyVerificationTool
 
-    # 直接把 page 对象传给你的验证类
-    return VerificationAgent(config=config, page=session.page)
+    return MyVerificationTool(config=config, session=session)

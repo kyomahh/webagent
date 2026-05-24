@@ -10,6 +10,11 @@ load_dotenv()
 # 环境变量命名规范：提供商_API_KEY（全大写，下划线分隔）
 _MODEL_CONFIGS = {
     # 智谱AI系列模型
+    "glm-4.7": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "default_params": {"temperature": 0.1, "max_tokens": 8192},
+    },
     "glm-4.7-flash": {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "api_key_env": "ZHIPUAI_API_KEY",
@@ -37,10 +42,21 @@ _MODEL_CONFIGS = {
         "api_key_env": "DASHSCOPE_API_KEY",
         "default_params": {"temperature": 0.1, "max_tokens": 4096},
     },
+    # 智谱视觉模型
+    "glm-4.6v-flash": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "default_params": {"temperature": 0.1, "max_tokens": 4096},
+    },
+    "GLM-4.6V-FlashX": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "default_params": {"temperature": 0.1, "max_tokens": 4096},
+    },
 }
 
 def get_llm(
-    model_name: str = "glm-4.7-flash",
+    model_name: str = "glm-4.7",
     temperature: Optional[float] = None,
     **kwargs: Any
 ) -> ChatOpenAI:

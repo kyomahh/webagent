@@ -88,8 +88,9 @@ def build_planner_prompt(
 2. 构建知识库: build_knowledge_base
 3. 提取功能点: extract_features
 4. 生成测试用例: generate_scenarios
-5. 对每个测试用例依次: plan_and_execute → verify_results
-6. 全部完成后: generate_report
+5. **必须第一个执行注册用例**: 找到 scenario_name 中含"注册"的用例优先执行 plan_and_execute。如果没有注册用例但有登录用例，说明测试用例生成有遗漏，应先执行登录用例前的注册流程（先访问登录页，点击"注册"按钮跳转到注册页，填写表单完成注册）
+6. 对每个测试用例依次: plan_and_execute → verify_results
+7. 全部完成后: generate_report
 
 ## 决策规则
 - 根据当前数据状态判断下一步动作
@@ -100,7 +101,17 @@ def build_planner_prompt(
 - 如果验证失败，可以对同一 scenario_id 重新执行 plan_and_execute（最多重试 {max_retries} 次）
 - 全部测试用例执行并验证完毕后，调用 generate_report
 - 每次只输出一个动作
-- args 中使用具体值，不要使用占位符"""
+- args 中使用具体值，不要使用占位符
+
+## 关键：注册优先策略
+- 大多数 Web 应用需要登录才能使用功能，因此在测试任何功能前必须先完成注册
+- 注册流程通常是：打开登录页 → 点击"注册"或"Sign up"按钮 → 跳转到注册页面 → 填写用户名/邮箱/密码 → 点击注册按钮
+- 必须优先执行「注册」相关的测试用例（scenario_name 中包含"注册"或"register"的用例）
+- 如果测试用例列表中没有注册用例，planner 应选择第一个登录用例执行，但在执行时 plan_and_execute 会自动处理（先访问登录页，寻找注册链接）
+- 注册时使用固定测试账号：用户名 "testuser001"，邮箱 "testuser001@test.com"，密码 "Test@123456"
+- 注册成功后，后续所有登录用例都使用 testuser001 / Test@123456
+- 执行顺序必须为：注册 → 登录 → 其他功能测试
+- 如果所有测试都因"用户名或密码无效"而失败，说明注册未完成，需要先注册再继续"""
 
 
 def build_replanner_prompt(max_retries: int = 2) -> str:

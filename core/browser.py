@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ class BrowserSession:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
+        self._lock = threading.Lock()
 
     def ensure_page(self, headless: bool = False) -> Page:
         """懒启动：第一次调用时才启动浏览器，后续调用返回同一个 page。
@@ -36,26 +38,27 @@ class BrowserSession:
         Returns:
             可用的 Playwright Page 对象
         """
-        if self.page is not None and not self.page.is_closed():
+        with self._lock:
+            if self.page is not None and not self.page.is_closed():
+                return self.page
+
+            from playwright.sync_api import sync_playwright
+
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(
+                headless=headless,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            self._context = self._browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                ignore_https_errors=True,
+                java_script_enabled=True,
+            )
+            self.page = self._context.new_page()
             return self.page
-
-        from playwright.sync_api import sync_playwright
-
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            headless=headless,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-        self._context = self._browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            ignore_https_errors=True,
-            java_script_enabled=True,
-        )
-        self.page = self._context.new_page()
-        return self.page
 
     def close(self) -> None:
         """统一清理浏览器资源。在 main.py 的 finally 中调用。"""

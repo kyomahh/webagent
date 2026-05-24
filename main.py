@@ -16,11 +16,95 @@
 
 import argparse
 import os
+import subprocess
 import sys
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _make_registration_case() -> dict:
+    return {
+        "scenario_id": "TS_REG_001",
+        "feature_id": "F_REG",
+        "scenario_name": "注册新用户（测试前置条件）",
+        "type": "setup",
+        "requires": [],
+        "produces": ["registered_account"],
+        "priority": 0,
+        "steps": [
+            "打开目标网站登录页面",
+            "点击登录页面上的 \"Create an account\" 按钮",
+            "在注册页面的用户名输入框中输入 \"testuser001\"",
+            "在邮箱输入框中输入 \"testuser001@test.com\"",
+            "在密码输入框中输入 \"Test@123456\"",
+            "如果存在确认密码输入框，输入 \"Test@123456\"",
+            "如果存在服务条款或隐私协议复选框，勾选同意",
+            "点击注册按钮",
+            "验证注册成功（页面跳转到登录页或首页）",
+        ],
+        "expectations": [
+            "注册成功",
+            "页面跳转到登录页面或首页",
+        ],
+    }
+
+
+def _is_registration_case(test_case: dict) -> bool:
+    text = " ".join([
+        str(test_case.get("scenario_id", "")),
+        str(test_case.get("feature_id", "")),
+        str(test_case.get("scenario_name", "")),
+        " ".join(str(s) for s in test_case.get("steps", [])),
+    ]).lower()
+    return any(
+        keyword in text
+        for keyword in [
+            "ts_reg",
+            "注册",
+            "register",
+            "registration",
+            "create an account",
+            "sign up",
+        ]
+    )
+
+
+def _registration_case_score(test_case: dict) -> int:
+    text = " ".join([
+        str(test_case.get("scenario_id", "")),
+        str(test_case.get("feature_id", "")),
+        str(test_case.get("scenario_name", "")),
+        " ".join(str(s) for s in test_case.get("steps", [])),
+        " ".join(str(e) for e in test_case.get("expectations", [])),
+    ]).lower()
+    score = 0
+    if "ts_reg" in text or "前置" in text or "setup" in text:
+        score += 100
+    if any(keyword in text for keyword in ["成功", "新用户", "有效", "create an account", "register"]):
+        score += 20
+    if any(keyword in text for keyword in ["失败", "错误", "已存在", "为空", "invalid", "wrong"]):
+        score -= 50
+    return score
+
+
+def _ensure_registration_first(test_cases: list[dict]) -> tuple[list[dict], bool]:
+    """确保 resume 的旧缓存也有注册前置用例，并把它放在第一位。"""
+    cases = list(test_cases or [])
+    registration_indexes = [
+        idx for idx, case in enumerate(cases) if _is_registration_case(case)
+    ]
+    registration_index = max(
+        registration_indexes,
+        key=lambda idx: _registration_case_score(cases[idx]),
+    ) if registration_indexes else None
+    if registration_index is None:
+        return [_make_registration_case(), *cases], True
+    if registration_index != 0:
+        registration_case = cases.pop(registration_index)
+        return [registration_case, *cases], False
+    return cases, False
 
 
 def main():
@@ -29,21 +113,21 @@ def main():
     )
 
     parser.add_argument(
-        "--url", type=str, default="https://demo.4gaboards.com/",
-        help="目标网站 URL (默认: https://demo.4gaboards.com/)",
+        "--url", type=str, default="http://localhost:3000",
+        help="目标网站 URL (默认: http://localhost:3000)",
     )
     parser.add_argument(
         "--manual", type=str, default=None,
         help="用户手册网站 URL (如: https://docs.4gaboards.com/)",
     )
     parser.add_argument(
-        "--manual-dir", type=str, default=None,
-        help="本地手册目录路径 (如: ./manual)",
+        "--manual-dir", type=str, default="./manual",
+        help="本地手册目录路径 (默认: ./manual)",
     )
     parser.add_argument(
-        "--model", type=str, default="glm-4.7-flash",
-        choices=["glm-4.7-flash", "glm-4-plus", "deepseek-chat", "qwen-plus"],
-        help="使用的 LLM 模型 (默认: glm-4.7-flash)",
+        "--model", type=str, default="glm-4.7",
+        choices=["glm-4.7", "glm-4.7-flash", "glm-4-plus", "deepseek-chat", "qwen-plus"],
+        help="使用的 LLM 模型 (默认: glm-4.7)",
     )
     parser.add_argument(
         "--max-retries", type=int, default=2,
@@ -61,6 +145,10 @@ def main():
         "--visualize", action="store_true",
         help="启动 Streamlit 可视化界面查看已有报告",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="复用已生成的测试用例（output/test_cases.json），跳过手册加载、知识库构建、功能提取和用例生成阶段",
+    )
 
     args = parser.parse_args()
 
@@ -69,7 +157,7 @@ def main():
         report_path = os.path.join(os.path.dirname(__file__), "output", "report_stub.json")
         viz_script = os.path.join(os.path.dirname(__file__), "tools", "stub", "visualize_stub.py")
         if os.path.exists(viz_script):
-            os.system(f"streamlit run {viz_script}")
+            subprocess.run(["streamlit", "run", viz_script], check=True)
         else:
             print(f"报告路径: {report_path}")
             print("请使用 --stub 模式先生成报告，或等待可视化模块实现。")
@@ -120,6 +208,8 @@ def main():
         print(f"  手册目录: {args.manual_dir}")
     print(f"  模型: {config.model_name}")
     print(f"  模式: {'Stub (测试)' if args.stub else '真实模块'}")
+    if args.resume:
+        print(f"  Resume: 复用已生成测试用例")
     print(f"  最大重试: {config.max_retries}")
     print("=" * 60)
 
@@ -142,6 +232,40 @@ def main():
         f"最大重试次数: {config.max_retries}。"
     )
 
+    # --resume: 从 output/ 加载已保存的测试用例，跳过生成阶段
+    import json
+    preloaded_features = []
+    preloaded_cases = []
+    preloaded_docs = []
+
+    if args.resume:
+        output_dir = config.output_dir
+        features_path = os.path.join(output_dir, "features.json")
+        cases_path = os.path.join(output_dir, "test_cases.json")
+
+        if os.path.isfile(cases_path):
+            with open(cases_path, "r", encoding="utf-8") as f:
+                preloaded_cases = json.load(f)
+            preloaded_cases, inserted_registration = _ensure_registration_first(preloaded_cases)
+            print(f"  [Resume] 已加载 {len(preloaded_cases)} 个测试用例: {cases_path}")
+            if inserted_registration:
+                print("  [Resume] 旧测试用例缺少注册前置，已自动插入 TS_REG_001")
+            # 加载功能点（可选）
+            if os.path.isfile(features_path):
+                with open(features_path, "r", encoding="utf-8") as f:
+                    preloaded_features = json.load(f)
+                print(f"  [Resume] 已加载 {len(preloaded_features)} 个功能点: {features_path}")
+            # 模拟 documents（占位，避免 planner 认为需要重新加载）
+            preloaded_docs = [{"content": "已缓存", "source": "resume"}]
+            initial_input = (
+                f"请对目标网站 {config.target_url} 进行自动化测试。"
+                f"测试用例已预加载（共 {len(preloaded_cases)} 个），请直接开始执行测试用例。"
+                f"最大重试次数: {config.max_retries}。"
+            )
+        else:
+            print(f"  [Resume] 未找到 {cases_path}，将从头开始生成测试用例")
+            args.resume = False
+
     # 执行
     try:
         result = graph.invoke({
@@ -154,9 +278,9 @@ def main():
             "current_task": {},
             "past_steps": [],
             "response": "",
-            "documents": [],
-            "features": [],
-            "test_cases": [],
+            "documents": preloaded_docs if args.resume else [],
+            "features": preloaded_features if args.resume else [],
+            "test_cases": preloaded_cases if args.resume else [],
             "execution_plans": {},
             "execution_results": {},
             "execution_memory": {},

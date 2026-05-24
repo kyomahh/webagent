@@ -11,8 +11,8 @@ import os
 import pytest
 
 # ──── 组员修改此处：替换为你的实现 ────
-# from tools.impl.verification_impl import MyVerificationTool
-from tools.stub.verification_stub import StubVerificationTool as ImplToTest
+from tools.impl.verification_impl import MyVerificationTool as ImplToTest
+# from tools.stub.verification_stub import StubVerificationTool as ImplToTest
 
 from conftest import (
     assert_verification_format,
