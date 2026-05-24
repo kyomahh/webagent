@@ -27,13 +27,14 @@ class BrowserSession:
         self._context: BrowserContext | None = None
         self._lock = threading.Lock()
 
-    def ensure_page(self, headless: bool = False) -> Page:
+    def ensure_page(self, headless: bool = False, target_url: str | None = None) -> Page:
         """懒启动：第一次调用时才启动浏览器，后续调用返回同一个 page。
 
         如果 page 已关闭（如浏览器崩溃），会自动重建。
 
         Args:
             headless: 是否无头模式
+            target_url: 自动导航的目标URL（可选，避免 about:blank 状态）
 
         Returns:
             可用的 Playwright Page 对象
@@ -58,6 +59,15 @@ class BrowserSession:
                 java_script_enabled=True,
             )
             self.page = self._context.new_page()
+
+            # 如果提供了 target_url，自动导航过去，避免 about:blank 状态
+            if target_url:
+                try:
+                    self.page.goto(target_url, timeout=10000)
+                    print(f"[BrowserSession] 自动导航到: {target_url}")
+                except Exception as e:
+                    print(f"[BrowserSession] 自动导航失败: {e}，使用空白页面")
+
             return self.page
 
     def close(self) -> None:

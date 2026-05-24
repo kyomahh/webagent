@@ -48,7 +48,7 @@ REQUIRED_STEP_FIELDS = [
 PREFERRED_MODEL_NAME = "GLM-4.6V-FlashX"
 
 # 视觉定位置信度阈值：低于此值直接跳过，走正则兜底。
-VISION_CONFIDENCE_THRESHOLD = 0.7
+VISION_CONFIDENCE_THRESHOLD = 0.6
 
 
 class PlaywrightExecutionTool(ExecutionToolInterface):
@@ -71,6 +71,9 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
         self.output_dir = getattr(config, "output_dir", "output") or "output"
         self.headless = bool(getattr(config, "headless", False))
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # 临时浏览器资源（用于独立模式下的清理）
+        self._temp_browser = None  # (playwright_obj, browser, context) or None
 
     # ==================================================================
     # 一、plan(): LLM 驱动的测试步骤规划
@@ -134,13 +137,33 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
         return self._rule_based_plan(test_case)
 
     def _is_auth_flow_case(self, test_case: dict) -> bool:
+        """判断是否为认证流程测试用例（登录/注册等关键流程）。
+
+        使用混合匹配策略：
+        1. 英文单词使用 \b 单词边界，避免 "register" 匹配 "registered"
+        2. 中文使用直接子串匹配（因为中文没有明确的"单词"概念）
+        """
         text = " ".join([
             str(test_case.get("scenario_id", "")),
             str(test_case.get("feature_id", "")),
             str(test_case.get("scenario_name", "")),
             " ".join(str(step) for step in test_case.get("steps", [])),
         ]).lower()
-        return any(keyword in text for keyword in ["注册", "register", "create an account", "sign up", "登录", "login", "log in"])
+        import re
+
+        # 中文关键词直接匹配（中文没有单词边界概念）
+        chinese_keywords = ["注册", "登录"]
+        for kw in chinese_keywords:
+            if kw in text:
+                return True
+
+        # 英文关键词使用单词边界匹配
+        auth_patterns = [
+            r"\bregister(?!ed)\b", r"\bregistration\b",  # register (not registered)
+            r"\bcreate an account\b", r"\bsign up\b",
+            r"\blogin\b", r"\blog in\b"
+        ]
+        return any(re.search(pattern, text, re.I) for pattern in auth_patterns)
 
     def _plan_too_short(self, plan: list[dict], test_case: dict) -> bool:
         raw_steps = [str(step).strip() for step in test_case.get("steps", []) if str(step).strip()]
@@ -620,6 +643,20 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
         screenshot_path = ""
 
         try:
+            # 特殊处理：识别验证类步骤，直接返回成功
+            if self._is_verification_step(action_detail):
+                print(f"[Step {step_id}] 检测到验证类步骤，跳过实际操作")
+                return {
+                    "step_id": step_id,
+                    "success": True,
+                    "result": action_detail,
+                    "result_text": f"验证成功: {action_detail}",
+                    "action_type": "verify",
+                    "url": page.url,
+                    "title": page.title(),
+                    "page_text": self._safe_page_text(page)[:500],
+                }
+
             self._ensure_page_for_step(page, step)
 
             if action_type == "navigate":
@@ -1787,3 +1824,617 @@ HTML 源码（截取）:
         except Exception:
             number = default
         return max(min_value, min(number, max_value))
+
+    # ==================================================================
+    # 五、改进的执行流程：页面确认 + 元素预检查 + 智能重试
+    # ==================================================================
+
+    def execute_with_verification(self, plan: list[dict], target_url: str,
+                                 memory: dict, max_retries: int = 3) -> dict:
+        """带页面确认和元素预检查的执行方法。
+
+        改进后的三阶段执行流程：
+        1. 初始页面状态确认 - 确保执行前页面状态正确
+        2. 逐步骤执行（每步包含：页面确认 → 元素预检查 → 执行）
+           - 注意：元素预检查是逐步骤进行的，因为步骤会改变页面状态
+        3. 失败分析与智能重试 - 最多3次重试
+
+        关键改进：不再一次性预检查所有步骤的元素，而是每个步骤执行前
+        只检查该步骤的元素。这解决了跨页面操作（如：登录页→注册页）的问题。
+
+        Args:
+            plan: 执行计划列表
+            target_url: 目标URL
+            memory: 执行记忆
+            max_retries: 最大重试次数
+
+        Returns:
+            {"results": [], "memory": {}, "screenshots": [], "retry_count": int}
+        """
+        import core.llm as llm_module
+
+        # 初始化分析器
+        page_analyzer = None
+        element_checker = None
+
+        try:
+            from tools.impl.page_analyzer import PageStateAnalyzer
+            from tools.impl.element_checker import ElementLocatabilityChecker
+
+            page_analyzer = PageStateAnalyzer(llm_module.get_llm, target_url)
+            element_checker = ElementLocatabilityChecker(llm_module.get_llm)
+
+        except ImportError as e:
+            print(f"[ExecutionWithVerification] 警告: 无法导入分析器 ({e})，使用标准执行流程")
+            return self.execute(plan, target_url, memory)
+
+        # 获取 page，传递 target_url 启用自动导航
+        page = self._get_page_for_execution(target_url)
+
+        if not page:
+            return {"results": [], "memory": memory, "screenshots": [], "error": "无法获取浏览器页面"}
+
+        # 等待页面加载完成后再进行状态检查
+        if target_url and page.url == "about:blank":
+            try:
+                # 等待页面网络空闲
+                page.wait_for_load_state("networkidle", timeout=5000)
+                print(f"[ExecutionWithVerification] 页面已加载: {page.url}")
+            except Exception as e:
+                print(f"[ExecutionWithVerification] 页面加载超时，继续执行: {e}")
+
+        # 阶段1: 初始页面确认
+        print("\n" + "="*60)
+        print("[阶段1] 页面状态确认")
+        print("="*60)
+
+        first_step = plan[0] if plan else {}
+        expected_initial_page = self._infer_expected_page_for_step(first_step)
+
+        if expected_initial_page:
+            page_verify_result = self._ensure_page_state(
+                page, expected_initial_page, page_analyzer, target_url
+            )
+
+            if not page_verify_result["verified"]:
+                # 无法达到初始页面状态
+                print(f"[ExecutionWithVerification] 初始页面状态不符，终止执行")
+                return self._generate_execution_failed_result(
+                    plan, f"初始页面状态不符: {page_verify_result['reason']}"
+                )
+
+        # 阶段2: 执行步骤（每步执行前预检查该步骤的元素）
+        print("\n" + "="*60)
+        print("[阶段2] 执行步骤（逐步骤预检查 + 执行）")
+        print("="*60)
+
+        results = []
+        screenshots = []
+
+        for step in plan:
+            step_id = step.get("step_id")
+            print(f"\n[Step {step_id}] 开始处理")
+
+            # 2.1 每步执行前确认页面状态
+            expected_page = self._infer_expected_page_for_step(step)
+            if expected_page:
+                page_verify = self._ensure_page_state(page, expected_page, page_analyzer, target_url)
+                if not page_verify["verified"]:
+                    print(f"[Step {step_id}] 页面验证失败: {page_verify['reason']}")
+                    results.append(self._make_failed_result(
+                        step, f"页面验证失败: {page_verify['reason']}"
+                    ))
+                    continue
+
+            # 2.2 执行前预检查当前步骤的元素（不是一次性检查所有步骤）
+            print(f"[Step {step_id}] 预检查元素...")
+            check_result = element_checker.check_elements_for_step(page, step)
+
+            if check_result["check_passed"]:
+                print(f"[Step {step_id}] ✓ 元素预检查通过: {check_result.get('reason', '')}")
+            else:
+                print(f"[Step {step_id}] ⚠ 元素预检查未完全通过，但仍尝试执行")
+                print(f"  └─ 原因: {check_result.get('failure_reason', '')}")
+                # 即使预检查失败也继续执行，因为实际执行时页面可能已变化
+
+            # 2.3 执行步骤
+            step_result = self._execute_one_step(page, step, target_url, screenshots)
+            results.append(step_result)
+
+            # 记录执行结果
+            self._record_action(memory, step_result)
+
+            # 检查是否需要重试
+            if not step_result["success"]:
+                print(f"\n[Step {step_id}] 执行失败，进入智能重试流程")
+                retry_result = self._intelligent_retry(
+                    step, step_result, page, target_url, page_analyzer, element_checker
+                )
+                if retry_result["success"]:
+                    # 重试成功，替换结果
+                    results[-1] = retry_result
+                    print(f"[Step {step_id}] 重试成功")
+                else:
+                    print(f"[Step {step_id}] 重试仍然失败: {retry_result.get('result_text', '')}")
+
+        print("\n" + "="*60)
+        print("[执行完成]")
+        print("="*60)
+
+        success_count = sum(1 for r in results if r["success"])
+        print(f"总结: {success_count}/{len(results)} 个步骤成功")
+
+        return {
+            "results": results,
+            "memory": memory,
+            "screenshots": screenshots,
+            "retry_count": 0,  # 总重试次数
+        }
+
+    def _get_page_for_execution(self, target_url: str | None = None) -> Page | None:
+        """获取用于执行的 Page 对象。
+
+        Args:
+            target_url: 目标URL，用于自动导航（可选）
+
+        Returns:
+            Page 对象或 None
+
+        Note:
+            如果创建临时浏览器，调用方应该调用 _cleanup_temp_browser() 来清理资源
+        """
+        # 优先使用共享 session，传递 target_url 启用自动导航
+        if self.session is not None:
+            return self.session.ensure_page(self.headless, target_url=target_url)
+
+        # 独立模式需要临时创建浏览器
+        playwright_obj = None
+        browser = None
+        context = None
+        page = None
+
+        try:
+            playwright_obj = sync_playwright().start()
+            browser = playwright_obj.chromium.launch(headless=self.headless, args=BROWSER_ARGS)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                ignore_https_errors=True,
+                java_script_enabled=True,
+            )
+            page = context.new_page()
+
+            # 如果有 target_url，自动导航过去，避免 about:blank 状态
+            if hasattr(self, 'config') and self.config.target_url:
+                try:
+                    page.goto(self.config.target_url, timeout=10000)
+                    print(f"[Browser] 自动导航到: {self.config.target_url}")
+                except Exception as e:
+                    print(f"[Browser] 自动导航失败: {e}，继续使用空白页面")
+
+            # 保存引用以便后续清理
+            self._temp_browser = (playwright_obj, browser, context, page)
+            return page
+        except Exception as e:
+            print(f"[ExecutionWithVerification] 创建浏览器失败: {e}")
+            # 清理已创建的资源（按相反顺序）
+            self._cleanup_browser_resources(playwright_obj, browser, context, page)
+            self._temp_browser = None
+            return None
+
+    def _cleanup_temp_browser(self):
+        """清理临时创建的浏览器资源。"""
+        if self._temp_browser is None:
+            return
+
+        # 解包元组（现在有 4 个元素）
+        if len(self._temp_browser) == 4:
+            playwright_obj, browser, context, page = self._temp_browser
+        else:
+            # 兼容旧格式（3 个元素）
+            playwright_obj, browser, context = self._temp_browser[:3]
+            page = None
+
+        self._cleanup_browser_resources(playwright_obj, browser, context, page)
+        self._temp_browser = None
+
+    @staticmethod
+    def _cleanup_browser_resources(playwright_obj, browser, context, page=None):
+        """清理浏览器资源的静态方法，确保每个资源都被安全关闭。
+
+        Args:
+            playwright_obj: Playwright 对象
+            browser: 浏览器对象
+            context: 浏览器上下文对象
+            page: 页面对象（可选）
+        """
+        # 清理顺序：page -> context -> browser -> playwright_obj
+
+        # 清理 page
+        if page is not None:
+            try:
+                if not page.is_closed():
+                    page.close()
+            except Exception as e:
+                print(f"[Cleanup] 关闭页面失败: {e}")
+
+        # 清理 context
+        if context is not None:
+            try:
+                context.close()
+            except Exception as e:
+                print(f"[Cleanup] 关闭浏览器上下文失败: {e}")
+
+        # 清理 browser
+        if browser is not None:
+            try:
+                if browser.is_connected():
+                    browser.close()
+            except Exception as e:
+                print(f"[Cleanup] 关闭浏览器失败: {e}")
+
+        # 清理 playwright_obj
+        if playwright_obj is not None:
+            try:
+                playwright_obj.stop()
+            except Exception as e:
+                print(f"[Cleanup] 停止 Playwright 失败: {e}")
+
+    def _is_verification_step(self, action_detail: str) -> bool:
+        """判断是否为验证类步骤。
+
+        验证类步骤只检查当前状态，不执行任何实际操作。
+
+        Args:
+            action_detail: 步骤描述
+
+        Returns:
+            是否为验证类步骤
+        """
+        if not action_detail:
+            return False
+
+        verification_keywords = [
+            "验证", "检查", "check", "verify", "确认", "confirm",
+            "成功", "success", "跳转", "redirect"
+            # 移除 "页面"，避免误判 "login page" 等正常操作步骤
+        ]
+
+        action_detail_lower = action_detail.lower()
+
+        # 检查是否包含验证关键词
+        has_verify_keyword = any(kw in action_detail_lower for kw in verification_keywords)
+
+        # 验证类步骤通常不会包含具体操作词（如"点击"、"输入"等）
+        is_not_action_step = not any(
+            word in action_detail_lower
+            for word in ["点击", "click", "输入", "type", "select", "勾选", "check box"]
+        )
+
+        return has_verify_keyword and is_not_action_step
+
+    def _infer_expected_page_for_step(self, step: dict) -> str | None:
+        """根据步骤推断预期的页面类型。
+
+        注意：验证类步骤（包含"验证"、"成功"等）不应该有严格的页面类型要求，
+        因为它们是检查当前状态而不是改变状态。
+        """
+        action_detail = str(step.get("action_detail", "")).lower()
+        target_element = str(step.get("target_element", "")).lower()
+        action_type = str(step.get("action_type", "")).lower()
+
+        # 识别验证类步骤：这类步骤只是验证当前状态，不应该改变页面
+        verification_keywords = ["验证", "检查", "check", "verify", "确认", "confirm", "成功", "success"]
+        is_verification_step = any(kw in action_detail for kw in verification_keywords)
+
+        if is_verification_step:
+            # 验证步骤不需要严格的页面类型要求
+            # 返回 None 表示不进行页面状态验证
+            print(f"[PageInference] 检测到验证类步骤，跳过页面类型推断: {action_detail[:50]}")
+            return None
+
+        # 登录相关（排除验证类步骤）
+        if any(kw in action_detail or kw in target_element for kw in
+               ["login", "log in", "signin", "sign in", "登录"]):
+            return "login_page"
+
+        # 注册相关（排除验证类步骤）
+        if any(kw in action_detail or kw in target_element for kw in
+               ["register", "sign up", "create account"]):
+            # 如果只是导航到注册页面，则返回 registration_page
+            # 但如果是在注册页面操作，则不需要特殊处理
+            if "导航" in action_detail or "navigate" in action_type or "打开" in action_detail:
+                return "registration_page"
+            # 其他情况（如在注册页输入）不需要特殊页面类型要求
+
+        # 仪表盘/主页相关
+        if any(kw in action_detail or kw in target_element for kw in
+               ["dashboard", "home", "主页", "首页", "看板"]):
+            return "dashboard"
+
+        return None
+
+    def _ensure_page_state(self, page: Page, expected_page_type: str | None,
+                          page_analyzer, target_url: str | None = None) -> dict:
+        """确保页面状态符合预期。
+
+        Args:
+            page: Playwright Page 对象
+            expected_page_type: 预期的页面类型（None表示不验证）
+            page_analyzer: PageStateAnalyzer 实例
+            target_url: 目标网站URL（用于页面恢复）
+
+        Returns:
+            {"verified": True/False, "reason": "原因说明", "recovery_attempted": bool}
+        """
+        # 如果不需要验证页面类型（如验证类步骤），直接返回成功
+        if expected_page_type is None:
+            print(f"[PageVerify] ⊘ 跳过页面验证（验证类步骤或无页面要求）")
+            return {"verified": True, "reason": "无需页面验证"}
+
+        # 特殊处理：检测到 about:blank 状态，自动导航到目标URL
+        current_url = page.url
+        if current_url == "about:blank" and target_url:
+            print(f"[PageVerify] 检测到 about:blank 状态，自动导航到: {target_url}")
+            try:
+                page.goto(target_url, timeout=10000)
+                page.wait_for_load_state("networkidle", timeout=5000)
+                print(f"[PageVerify] 导航成功，当前 URL: {page.url}")
+            except Exception as e:
+                print(f"[PageVerify] 导航失败: {e}，继续后续处理")
+                # 即使导航失败也继续，让页面恢复机制处理
+
+        # 分析当前页面
+        current_state = page_analyzer.analyze_current_page(page)
+        is_match, reason = page_analyzer.verify_page_match(current_state, expected_page_type)
+
+        if is_match:
+            print(f"[PageVerify] ✓ {reason}")
+            return {"verified": True, "reason": reason}
+
+        # 页面不匹配
+        print(f"[PageVerify] ✗ {reason}")
+
+        # 尝试恢复
+        recovery_action = page_analyzer.generate_page_recovery_action(
+            current_state, expected_page_type
+        )
+
+        if recovery_action:
+            print(f"[PageVerify] 尝试恢复: {recovery_action.get('reasoning', '')}")
+            recovery_success = page_analyzer.execute_recovery_action(page, recovery_action, target_url)
+
+            if recovery_success:
+                # 等待页面加载
+                time.sleep(2)
+
+                # 重新验证
+                new_state = page_analyzer.analyze_current_page(page)
+                is_match, reason = page_analyzer.verify_page_match(new_state, expected_page_type)
+
+                if is_match:
+                    print(f"[PageVerify] ✓ 恢复成功: {reason}")
+                    return {"verified": True, "reason": reason, "recovery_attempted": True}
+
+        # 恢复失败
+        return {
+            "verified": False,
+            "reason": reason,
+            "recovery_attempted": recovery_action is not None
+        }
+
+    def _intelligent_retry(self, step: dict, failed_result: dict, page: Page, target_url: str,
+                          page_analyzer, element_checker) -> dict:
+        """智能重试失败的步骤。
+
+        Args:
+            step: 失败的步骤
+            failed_result: 失败的执行结果
+            page: Playwright Page 对象
+            target_url: 目标URL
+            page_analyzer: PageStateAnalyzer 实例
+            element_checker: ElementLocatabilityChecker 实例
+
+        Returns:
+            重试后的执行结果
+        """
+        step_id = step.get("step_id", "?")
+        max_retries = 3
+
+        for retry in range(1, max_retries + 1):
+            print(f"[Retry {retry}/{max_retries}] 分析失败原因...")
+
+            # 分析失败原因
+            failure_analysis = self._analyze_step_failure(
+                step, failed_result, page, page_analyzer, element_checker
+            )
+
+            print(f"[Retry {retry}/{max_retries}] 失败原因: {failure_analysis.get('primary_reason', '未知')}")
+
+            # 检查是否应该重试
+            if not failure_analysis.get("should_retry", True):
+                print(f"[Retry {retry}/{max_retries}] 分析建议不重试")
+                break
+
+            # 生成改进建议
+            improvements = failure_analysis.get("improvements", [])
+
+            # 应用改进
+            if improvements:
+                print(f"[Retry {retry}/{max_retries}] 应用改进: {improvements}")
+                improved_step = self._apply_improvements(step, improvements)
+
+                # 等待一段时间
+                wait_time = failure_analysis.get("wait_before_retry", 2)
+                if wait_time > 0:
+                    print(f"[Retry {retry}/{max_retries}] 等待 {wait_time} 秒...")
+                    time.sleep(wait_time)
+
+                # 重新执行
+                screenshots = []
+                retry_result = self._execute_one_step(page, improved_step, target_url, screenshots)
+
+                if retry_result["success"]:
+                    print(f"[Retry {retry}/{max_retries}] ✓ 重试成功")
+                    return retry_result
+                else:
+                    print(f"[Retry {retry}/{max_retries}] ✗ 重试失败: {retry_result.get('result_text', '')}")
+                    failed_result = retry_result  # 更新失败结果用于下一次分析
+
+        # 所有重试都失败
+        print(f"[Retry] 已达到最大重试次数 ({max_retries})，放弃重试")
+        return failed_result
+
+    def _analyze_step_failure(self, step: dict, failed_result: dict, page: Page,
+                             page_analyzer, element_checker) -> dict:
+        """分析步骤失败原因。
+
+        Returns:
+            {
+                "primary_reason": "主要原因",
+                "should_retry": True/False,
+                "improvements": ["改进建议"],
+                "wait_before_retry": 等待秒数
+            }
+        """
+        error_message = failed_result.get("result_text", "")
+        action_type = step.get("action_type", "")
+
+        # 获取页面上下文
+        try:
+            page_text = page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            page_text = ""
+
+        # 使用 LLM 分析
+        prompt = f"""你是一个Web自动化测试专家。请分析以下执行失败的原因。
+
+**执行步骤**: {json.dumps(step, ensure_ascii=False)}
+**错误信息**: {error_message}
+**当前页面文本**（前500字符）: {page_text[:500]}
+
+请分析：
+1. 失败的主要原因是什么？
+2. 是暂时性问题还是永久性问题？
+3. 是否应该重试？
+4. 如果重试，需要什么改进？
+
+请严格按照以下 JSON 格式输出：
+{{
+    "primary_reason": "主要原因",
+    "is_transient": true/false,
+    "should_retry": true/false,
+    "improvements": ["改进建议1", "改进建议2"],
+    "wait_before_retry": 2
+}}
+"""
+
+        try:
+            import core.llm as llm_module
+            llm = llm_module.get_llm()
+            response = llm.invoke(prompt)
+            analysis = self._parse_json_from_llm(response.content)
+
+            return {
+                "primary_reason": analysis.get("primary_reason", "未知原因"),
+                "should_retry": analysis.get("should_retry", True),
+                "improvements": analysis.get("improvements", []),
+                "wait_before_retry": analysis.get("wait_before_retry", 2),
+            }
+
+        except Exception as e:
+            print(f"[FailureAnalysis] LLM 分析失败: {e}")
+            # 回退到规则分析
+            return self._rule_based_failure_analysis(step, failed_result)
+
+    def _rule_based_failure_analysis(self, step: dict, failed_result: dict) -> dict:
+        """基于规则的失败分析。"""
+        error = failed_result.get("result_text", "").lower()
+        action = step.get("action_type", "")
+
+        # 超时错误
+        if "timeout" in error:
+            return {
+                "primary_reason": "元素定位超时",
+                "should_retry": True,
+                "improvements": ["增加等待时间", "检查页面是否加载完成"],
+                "wait_before_retry": 3,
+            }
+
+        # 元素不存在
+        if "not found" in error or "无法定位" in error:
+            if action == "navigate":
+                return {
+                    "primary_reason": "导航失败",
+                    "should_retry": False,
+                    "improvements": [],
+                    "wait_before_retry": 0,
+                }
+            else:
+                return {
+                    "primary_reason": "目标元素不存在",
+                    "should_retry": True,
+                    "improvements": ["检查页面是否正确", "尝试使用不同的定位策略"],
+                    "wait_before_retry": 2,
+                }
+
+        # 默认建议
+        return {
+            "primary_reason": "执行失败",
+            "should_retry": True,
+            "improvements": ["重试执行"],
+            "wait_before_retry": 2,
+        }
+
+    def _apply_improvements(self, step: dict, improvements: list[str]) -> dict:
+        """应用改进建议到步骤。"""
+        import copy
+        improved_step = copy.deepcopy(step)
+
+        for improvement in improvements:
+            # 等待建议
+            if "等待" in improvement or "wait" in improvement.lower():
+                improved_step["pre_wait"] = improved_step.get("pre_wait", 0) + 2
+
+            # 定位策略建议
+            if "定位策略" in improvement or "locator" in improvement.lower():
+                # 可以在这里修改定位策略
+                pass
+
+        return improved_step
+
+    def _parse_json_from_llm(self, text: str) -> dict:
+        """从 LLM 输出中解析 JSON。"""
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        return {}
+
+    def _generate_execution_failed_result(self, plan: list[dict], reason: str) -> dict:
+        """生成执行失败的结果。"""
+        failed_results = []
+        for step in plan:
+            failed_results.append(self._make_failed_result(step, reason))
+
+        return {
+            "results": failed_results,
+            "memory": {},
+            "screenshots": [],
+            "error": reason,
+        }

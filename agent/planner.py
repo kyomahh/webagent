@@ -44,7 +44,9 @@ def _registration_case_score(test_case: dict) -> int:
     score = 0
     if "ts_reg" in text or "前置" in text or "setup" in text:
         score += 100
-    if any(keyword in text for keyword in ["成功", "新用户", "有效", "create an account", "register"]):
+    # 使用单词边界匹配，避免 "register" 匹配到 "registered"
+    success_patterns = [r"\b成功\b", r"\b新用户\b", r"\b有效\b", r"\bcreate an account\b", r"\bregister(?!ed)\b"]
+    if any(re.search(pattern, text, re.I) for pattern in success_patterns):
         score += 20
     if any(keyword in text for keyword in ["失败", "错误", "已存在", "为空", "invalid", "wrong"]):
         score -= 50

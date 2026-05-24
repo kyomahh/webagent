@@ -82,29 +82,102 @@ def _registration_case_score(test_case: dict) -> int:
     score = 0
     if "ts_reg" in text or "前置" in text or "setup" in text:
         score += 100
-    if any(keyword in text for keyword in ["成功", "新用户", "有效", "create an account", "register"]):
+    # 使用单词边界匹配，避免 "register" 匹配到 "registered"
+    import re
+    success_patterns = [r"\b成功\b", r"\b新用户\b", r"\b有效\b", r"\bcreate an account\b", r"\bregister(?!ed)\b"]
+    if any(re.search(pattern, text, re.I) for pattern in success_patterns):
         score += 20
     if any(keyword in text for keyword in ["失败", "错误", "已存在", "为空", "invalid", "wrong"]):
         score -= 50
     return score
 
 
-def _ensure_registration_first(test_cases: list[dict]) -> tuple[list[dict], bool]:
-    """确保 resume 的旧缓存也有注册前置用例，并把它放在第一位。"""
+def _ensure_registration_first(test_cases: list[dict],
+                                verification_results: dict | None = None) -> tuple[list[dict], bool]:
+    """确保注册前置用例存在且在第一位。
+
+    策略：
+    1. 优先使用LLM生成的注册用例（如果存在且质量好）
+    2. 如果没有LLM生成的注册用例，添加备用注册用例
+    3. 如果注册已经成功，不需要再添加备用用例
+
+    Args:
+        test_cases: 测试用例列表
+        verification_results: 验证结果（可选，用于检查注册是否已成功）
+
+    Returns:
+        (处理后的测试用例列表, 是否添加了备用注册用例)
+    """
     cases = list(test_cases or [])
+
+    # 检查是否有LLM生成的注册用例
+    llm_generated_registration = None
+    backup_registration = None
+
+    for case in cases:
+        if _is_registration_case(case):
+            # 优先级1: 标记为setup的注册用例（LLM通常这样标记）
+            if case.get("type") == "setup":
+                llm_generated_registration = case
+                break
+            # 优先级2: scenario_id包含TS_REG的（可能是备用用例）
+            elif "ts_reg" in case.get("scenario_id", "").lower():
+                backup_registration = case
+            # 优先级3: 其他注册用例
+            elif llm_generated_registration is None:
+                llm_generated_registration = case
+
+    # 检查注册是否已经成功
+    registration_success = False
+    if verification_results:
+        for case in cases:
+            if _is_registration_case(case):
+                sid = case.get("scenario_id")
+                result = verification_results.get(sid, {})
+                if isinstance(result, dict) and result.get("passed"):
+                    registration_success = True
+                    print(f"[RegistrationCheck] ✓ 注册用例 {sid} 已验证通过")
+                    break
+
+    # 决策逻辑
+    if registration_success:
+        # 注册已成功，不需要添加备用用例
+        print("[RegistrationCheck] 注册已成功，不需要添加备用注册用例")
+        # 确保成功的注册用例在第一位
+        return _move_registration_to_first(cases), False
+
+    if llm_generated_registration:
+        # 有LLM生成的注册用例，使用它
+        print(f"[RegistrationCheck] 使用LLM生成的注册用例: {llm_generated_registration.get('scenario_id')}")
+        return _move_registration_to_first(cases), False
+
+    # 没有LLM生成的注册用例，添加备用用例
+    print("[RegistrationCheck] 未找到LLM生成的注册用例，添加备用注册用例 TS_REG_001")
+    backup_case = _make_registration_case()
+    return [backup_case, *cases], True
+
+
+def _move_registration_to_first(test_cases: list[dict]) -> list[dict]:
+    """将注册用例移动到列表第一位。"""
+    cases = list(test_cases)
     registration_indexes = [
         idx for idx, case in enumerate(cases) if _is_registration_case(case)
     ]
+
+    if not registration_indexes:
+        return cases
+
+    # 找到分数最高的注册用例
     registration_index = max(
         registration_indexes,
-        key=lambda idx: _registration_case_score(cases[idx]),
-    ) if registration_indexes else None
-    if registration_index is None:
-        return [_make_registration_case(), *cases], True
+        key=lambda idx: _registration_case_score(cases[idx])
+    )
+
     if registration_index != 0:
         registration_case = cases.pop(registration_index)
-        return [registration_case, *cases], False
-    return cases, False
+        return [registration_case, *cases]
+
+    return cases
 
 
 def main():
@@ -121,8 +194,8 @@ def main():
         help="用户手册网站 URL (如: https://docs.4gaboards.com/)",
     )
     parser.add_argument(
-        "--manual-dir", type=str, default="./manual",
-        help="本地手册目录路径 (默认: ./manual)",
+        "--manual-dir", type=str, default="./manual_1",
+        help="本地手册目录路径 (默认: ./manual_1)",
     )
     parser.add_argument(
         "--model", type=str, default="glm-4.7",

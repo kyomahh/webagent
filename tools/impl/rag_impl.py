@@ -329,31 +329,9 @@ class MyRagTool(RagToolInterface):
         test_cases = []
         scenario_counter: dict[str, int] = {}
 
-        # 第一个用例固定为注册，确保后续测试有可用账号
-        test_cases.append({
-            "scenario_id": "TS_REG_001",
-            "feature_id": "F_REG",
-            "scenario_name": "注册新用户（测试前置条件）",
-            "type": "setup",
-            "requires": [],
-            "produces": ["registered_account"],
-            "priority": 0,
-            "steps": [
-                "打开目标网站登录页面",
-                "点击登录页面上的 \"Create an account\" 按钮",
-                "在注册页面的用户名输入框中输入 \"testuser001\"",
-                "在邮箱输入框中输入 \"testuser001@test.com\"",
-                "在密码输入框中输入 \"Test@123456\"",
-                "如果存在确认密码输入框，输入 \"Test@123456\"",
-                "如果存在服务条款或隐私协议复选框，勾选同意",
-                "点击注册按钮",
-                "验证注册成功（页面跳转到登录页或首页）",
-            ],
-            "expectations": [
-                "注册成功",
-                "页面跳转到登录页面或首页",
-            ],
-        })
+        # 不再强制添加 TS_REG_001
+        # 让LLM根据功能点自然生成测试用例
+        # 如果没有生成注册用例，main.py 会添加备用注册用例
 
         for feat in features:
             fid = str(feat.get("feature_id", "F001")).strip()
@@ -441,11 +419,14 @@ class MyRagTool(RagToolInterface):
 
         print(f"[RagTool] 共生成 {len(test_cases)} 个测试用例")
 
+        # 确保注册用例存在且在第一位
+        test_cases = self._ensure_registration_case(test_cases)
+
         # 保存测试用例到 JSON 文件，便于查看和调试
         try:
             output_dir = getattr(self.config, "output_dir", "output") or "output"
             os.makedirs(output_dir, exist_ok=True)
-            save_path = os.path.join(output_dir, "test_cases.json")
+            save_path = os.path.join(output_dir, "test_cases_manual1.json")
             import json
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(test_cases, f, ensure_ascii=False, indent=2)
@@ -454,3 +435,95 @@ class MyRagTool(RagToolInterface):
             print(f"[RagTool] 保存测试用例失败: {e}")
 
         return test_cases
+
+    def _ensure_registration_case(self, test_cases: list[dict]) -> list[dict]:
+        """确保测试用例中包含注册用例且在第一位。
+
+        策略：
+        1. 检查是否已有注册用例（通过内容判断）
+        2. 如果有，确保它在第一位
+        3. 如果没有，添加备用注册用例
+
+        Args:
+            test_cases: 原始测试用例列表
+
+        Returns:
+            处理后的测试用例列表
+        """
+        cases = list(test_cases)
+        
+        # 检查是否已有注册用例
+        existing_registration = None
+        existing_registration_idx = -1
+        
+        for idx, case in enumerate(cases):
+            if self._is_registration_case(case):
+                # 优先级1: 标记为setup的注册用例
+                if case.get("type") == "setup":
+                    existing_registration = case
+                    existing_registration_idx = idx
+                    break
+                # 优先级2: scenario_id包含REG的
+                elif "reg" in case.get("scenario_id", "").lower() or "注册" in case.get("scenario_name", ""):
+                    if existing_registration is None:
+                        existing_registration = case
+                        existing_registration_idx = idx
+                # 优先级3: 内容包含注册关键词的
+                elif existing_registration is None:
+                    existing_registration = case
+                    existing_registration_idx = idx
+        
+        if existing_registration:
+            # 已有注册用例，确保它在第一位
+            print(f"[RagTool] 找到现有注册用例: {existing_registration.get('scenario_id')}")
+            if existing_registration_idx > 0:
+                # 移到第一位
+                cases.pop(existing_registration_idx)
+                cases = [existing_registration] + cases
+                print(f"[RagTool] 已将注册用例移到第一位")
+            return cases
+        
+        # 没有找到注册用例，添加备用用例
+        print("[RagTool] 未找到LLM生成的注册用例，添加备用注册用例")
+        backup_case = self._make_registration_case()
+        return [backup_case] + cases
+    
+    def _is_registration_case(self, test_case: dict) -> bool:
+        """判断是否是注册用例。"""
+        text = " ".join([
+            str(test_case.get("scenario_id", "")),
+            str(test_case.get("feature_id", "")),
+            str(test_case.get("scenario_name", "")),
+            " ".join(str(s) for s in test_case.get("steps", [])),
+        ]).lower()
+        return any(
+            keyword in text
+            for keyword in ["注册", "register", "registration", "create an account", "sign up", "ts_reg"]
+        )
+    
+    def _make_registration_case(self) -> dict:
+        """创建备用注册用例。"""
+        return {
+            "scenario_id": "TS_REG_BACKUP",
+            "feature_id": "F_REG",
+            "scenario_name": "注册新用户（备用测试前置条件）",
+            "type": "setup",
+            "requires": [],
+            "produces": ["registered_account"],
+            "priority": 0,
+            "steps": [
+                "打开目标网站登录页面",
+                "点击登录页面上的 \"Create an account\" 按钮",
+                "在用户名输入框中输入 \"testuser001\"",
+                "在邮箱输入框中输入 \"testuser001@test.com\"",
+                "在密码输入框中输入 \"Test@123456\"",
+                "如果存在确认密码输入框，输入 \"Test@123456\"",
+                "如果存在服务条款或隐私协议复选框，勾选同意",
+                "点击注册按钮",
+                "验证注册成功（页面跳转到登录页或首页）",
+            ],
+            "expectations": [
+                "注册成功",
+                "页面跳转到登录页面或首页",
+            ],
+        }
