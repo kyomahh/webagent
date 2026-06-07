@@ -9,6 +9,7 @@ venv/
 
 # Output (generated at runtime)
 output/
+tmpoutput/
 
 # Local design notes
 execution_agent.md
