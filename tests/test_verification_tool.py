@@ -131,3 +131,45 @@ class TestVisualize:
         }
         result = verification.visualize(state)
         assert isinstance(result, str)
+
+    def test_external_registration_failure_is_ignored_in_report_data(self, verification):
+        state = {
+            "test_cases": [
+                {
+                    "scenario_id": "TS_F002_001",
+                    "feature_id": "F002",
+                    "scenario_name": "New User Registration via Google SSO",
+                    "steps": [
+                        "Open the login page",
+                        "Click Sign in with Google",
+                    ],
+                    "expectations": ["The user completes third-party registration"],
+                },
+                {
+                    "scenario_id": "TS_F005_001",
+                    "feature_id": "F005",
+                    "scenario_name": "Board list view",
+                    "steps": ["Login", "Open the board list view"],
+                    "expectations": ["List view is visible"],
+                },
+            ],
+            "verification_results": {
+                "TS_F002_001": {
+                    "passed": False,
+                    "reason": "Google OAuth registration failed in test environment",
+                },
+                "TS_F005_001": {"passed": True, "reason": "全部通过"},
+            },
+        }
+
+        report_data = verification._prepare_report_data(state)
+        google_result = report_data["verification_results"]["TS_F002_001"]
+
+        assert report_data["passed_count"] == 1
+        assert report_data["failed_count"] == 0
+        assert report_data["ignored_count"] == 1
+        assert report_data["total_count"] == 1
+        assert report_data["pass_rate"] == "1/1"
+        assert google_result["ignored"] is True
+        assert google_result["effective_status"] == "ignored"
+        assert "第三方注册失败" in google_result["ignore_reason"]

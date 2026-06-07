@@ -95,7 +95,7 @@ def build_planner_prompt(
 2. 构建知识库: build_knowledge_base
 3. 提取功能点: extract_features
 4. 生成测试用例: generate_scenarios
-5. **必须第一个执行注册用例**: 找到 scenario_name 中含"注册"的用例优先执行 plan_and_execute。如果没有注册用例但有登录用例，说明测试用例生成有遗漏，应先执行登录用例前的注册流程（先访问登录页，点击"注册"按钮跳转到注册页，填写表单完成注册）
+5. **必须第一个执行本地账号注册用例**: 找到本地账号注册/Sign up/Create an account 用例优先执行 plan_and_execute；Google/GitHub/OAuth/SSO 等第三方注册不作为全局注册前置
 6. 对每个测试用例依次: plan_and_execute → verify_results
 7. 全部完成后: generate_report
 
@@ -113,11 +113,12 @@ def build_planner_prompt(
 ## 关键：注册优先策略
 - 大多数 Web 应用需要登录才能使用功能，因此在测试任何功能前必须先完成注册
 - 注册流程通常是：打开登录页 → 点击"注册"或"Sign up"按钮 → 跳转到注册页面 → 填写用户名/邮箱/密码 → 点击注册按钮
-- 必须优先执行「注册」相关的测试用例（scenario_name 中包含"注册"或"register"的用例）
+- 必须优先执行「本地账号注册」相关的测试用例（scenario_name 或步骤中包含"注册"、"register"、"Create an account" 或 "Sign up"的用例）
+- Google/GitHub/OAuth/SSO 等第三方注册/登录用例只是普通认证用例，失败后继续执行其他用例；它们不能算作注册前置成功，也不能因为失败而停止整个测试套件
 - 如果测试用例列表中没有注册用例，planner 应选择第一个登录用例执行，但在执行时 plan_and_execute 会自动处理（先访问登录页，寻找注册链接）
 - 注册时使用固定测试账号：{fixed_account_label()}
 - 注册成功后，后续所有登录用例都使用邮箱 "{TEST_ACCOUNT_EMAIL}" 和密码 "{TEST_ACCOUNT_PASSWORD}"；用户名 "{TEST_ACCOUNT_USERNAME}" 只用于注册页的用户名字段，不能当作密码拼接
-- 执行顺序必须为：注册 → 登录 → 其他功能测试
+- 执行顺序必须为：本地账号注册 → 登录 → 其他功能测试
 - 如果所有登录相关测试都因认证失败而失败，说明注册或登录前置条件未完成，需要先收敛前置流程再继续"""
 
 
@@ -133,6 +134,7 @@ def build_replanner_prompt(max_retries: int = 2) -> str:
 ## 重试策略
 - 如果某个测试用例验证失败，planner 可以重新对该用例执行 plan_and_execute（重新规划并执行）
 - 最多重试 {max_retries} 次失败用例，超过后跳过继续下一个
+- Google/GitHub/OAuth/SSO 等第三方注册失败不算主流程注册失败，应标记为可忽略并继续其他用例
 - 如果大部分用例已通过，即使有少量失败也可以进入 generate_report
 
 ## 判断完成的标准

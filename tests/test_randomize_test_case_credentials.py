@@ -44,7 +44,7 @@ def test_randomize_test_cases_replaces_credentials_recursively():
 
 
 def test_randomize_test_cases_file_writes_json(tmp_path):
-    json_path = tmp_path / "test_cases_manual1.json"
+    json_path = tmp_path / "test_cases_manual.json"
     json_path.write_text(
         json.dumps(_sample_cases(), ensure_ascii=False, indent=2),
         encoding="utf-8",

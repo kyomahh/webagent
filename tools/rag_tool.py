@@ -82,7 +82,10 @@ class RagToolInterface(BaseTool):
         Returns:
             测试用例列表:
             [{"scenario_id": str, "feature_id": str, "scenario_name": str,
-              "steps": [str], "expectations": [str]}]
+              "steps": [str], "expectations": [str],
+              "requires": [str], "produces": [str],
+              "citations": [dict], "source_confidence": str,
+              "unsupported_steps": [str]}]
         """
         ...
 
@@ -193,7 +196,12 @@ def make_rag_tools(rag_impl: RagToolInterface, cache: DataCache):
             sid = tc.get("scenario_id", "")
             name = tc.get("scenario_name", "")
             steps_count = len(tc.get("steps", []))
-            lines.append(f"  - {sid}: {name} ({steps_count} 步)")
+            source_confidence = tc.get("source_confidence", "unknown")
+            citation_count = len(tc.get("citations", []))
+            lines.append(
+                f"  - {sid}: {name} ({steps_count} 步, "
+                f"来源置信度: {source_confidence}, 引用: {citation_count})"
+            )
         return "\n".join(lines)
 
     return [crawl_manual, load_local_manual, build_knowledge_base,

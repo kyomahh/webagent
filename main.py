@@ -31,6 +31,7 @@ load_dotenv()
 
 
 RUN_LOG_PATH = os.path.join(os.path.dirname(__file__), "runtime.log")
+IMAGE_OUTPUT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 class _TeeStream:
@@ -103,6 +104,26 @@ def _setup_run_log():
     return log_file, original_stdout, original_stderr
 
 
+def _clear_previous_run_images(output_dir: str) -> int:
+    """删除上一轮运行遗留的图片文件；保留报告、PDF、JSON、日志等其他数据。"""
+    if not output_dir:
+        return 0
+
+    os.makedirs(output_dir, exist_ok=True)
+    deleted = 0
+    for root, _, files in os.walk(output_dir):
+        for filename in files:
+            if os.path.splitext(filename)[1].lower() not in IMAGE_OUTPUT_EXTENSIONS:
+                continue
+            path = os.path.join(root, filename)
+            try:
+                os.remove(path)
+                deleted += 1
+            except OSError as exc:
+                print(f"[OutputCleanup] 删除旧图片失败: {path} ({exc})")
+    return deleted
+
+
 def _make_registration_case() -> dict:
     return {
         "scenario_id": "TS_REG_001",
@@ -150,6 +171,35 @@ def _is_registration_case(test_case: dict) -> bool:
     )
 
 
+def _is_external_auth_case(test_case: dict) -> bool:
+    text = " ".join([
+        str(test_case.get("scenario_id", "")),
+        str(test_case.get("feature_id", "")),
+        str(test_case.get("scenario_name", "")),
+        " ".join(str(s) for s in test_case.get("steps", [])),
+        " ".join(str(e) for e in test_case.get("expectations", [])),
+    ]).lower()
+    return any(
+        marker in text
+        for marker in [
+            "sso",
+            "oauth",
+            "oidc",
+            "第三方",
+            "social login",
+            "external auth",
+            "google",
+            "github",
+            "microsoft",
+        ]
+    )
+
+
+def _is_core_registration_case(test_case: dict) -> bool:
+    """只把本地账号注册当作全局前置；第三方注册失败不能阻断主流程。"""
+    return _is_registration_case(test_case) and not _is_external_auth_case(test_case)
+
+
 def _registration_case_score(test_case: dict) -> int:
     text = " ".join([
         str(test_case.get("scenario_id", "")),
@@ -194,7 +244,7 @@ def _ensure_registration_first(test_cases: list[dict],
     backup_registration = None
 
     for case in cases:
-        if _is_registration_case(case):
+        if _is_core_registration_case(case):
             # 优先级1: 标记为setup的注册用例（LLM通常这样标记）
             if case.get("type") == "setup":
                 llm_generated_registration = case
@@ -210,7 +260,7 @@ def _ensure_registration_first(test_cases: list[dict],
     registration_success = False
     if verification_results:
         for case in cases:
-            if _is_registration_case(case):
+            if _is_core_registration_case(case):
                 sid = case.get("scenario_id")
                 result = verification_results.get(sid, {})
                 if isinstance(result, dict) and result.get("passed"):
@@ -240,7 +290,7 @@ def _move_registration_to_first(test_cases: list[dict]) -> list[dict]:
     """将注册用例移动到列表第一位。"""
     cases = list(test_cases)
     registration_indexes = [
-        idx for idx, case in enumerate(cases) if _is_registration_case(case)
+        idx for idx, case in enumerate(cases) if _is_core_registration_case(case)
     ]
 
     if not registration_indexes:
@@ -300,8 +350,8 @@ def main():
             help="用户手册网站 URL (如: https://docs.4gaboards.com/)",
         )
         parser.add_argument(
-            "--manual-dir", type=str, default="./manual_1",
-            help="本地手册目录路径 (默认: ./manual_1)",
+            "--manual-dir", type=str, default="./manual",
+            help="本地手册目录路径 (默认: ./manual)",
         )
         parser.add_argument(
             "--model", type=str, default="glm-4.7",
@@ -357,6 +407,9 @@ def main():
         config.model_name = args.model
         config.max_retries = args.max_retries
         config.headless = args.headless
+
+        deleted_images = _clear_previous_run_images(config.output_dir)
+        print(f"[OutputCleanup] 已删除上一轮运行图片 {deleted_images} 个，保留其他输出数据")
 
         # 创建共享浏览器会话（空壳，不启动浏览器）
         # 执行模块调用 ensure_page() 时才懒启动，验证模块通过 session.page 获取同一个 page

@@ -15,7 +15,10 @@ import re
 from datetime import datetime
 from typing import Any
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+except ModuleNotFoundError:
+    PlaywrightTimeoutError = TimeoutError
 
 from core.config import AgentConfig, default_config
 from tools.verification_tool import VerificationToolInterface
@@ -347,9 +350,39 @@ class MyVerificationTool(VerificationToolInterface):
         test_cases = state.get("test_cases", [])
         verification_results = state.get("verification_results", {})
         execution_results = state.get("execution_results", {})
+        case_by_id = {
+            str(tc.get("scenario_id", "")): tc
+            for tc in test_cases
+            if isinstance(tc, dict)
+        }
+        normalized_results = {}
+        ignored_count = 0
+        passed_count = 0
+        failed_count = 0
 
-        passed_count = sum(1 for v in verification_results.values() if v.get("passed"))
-        total_count = len(verification_results)
+        for sid, result in verification_results.items():
+            normalized = dict(result) if isinstance(result, dict) else {}
+            ignored = self._is_ignorable_external_registration_failure(
+                case_by_id.get(str(sid), {}),
+                normalized,
+            )
+            if ignored:
+                ignored_count += 1
+                normalized["ignored"] = True
+                normalized["effective_status"] = "ignored"
+                normalized.setdefault(
+                    "ignore_reason",
+                    "GitHub/Google 等第三方注册失败不作为主流程失败统计",
+                )
+            elif normalized.get("passed"):
+                passed_count += 1
+                normalized["effective_status"] = "passed"
+            else:
+                failed_count += 1
+                normalized["effective_status"] = "failed"
+            normalized_results[sid] = normalized
+
+        total_count = passed_count + failed_count
 
         return {
             "generated_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -357,11 +390,38 @@ class MyVerificationTool(VerificationToolInterface):
             "user_input": state.get("input", ""),
             "pass_rate": f"{passed_count}/{total_count}" if total_count > 0 else "N/A",
             "passed_count": passed_count,
+            "failed_count": failed_count,
+            "ignored_count": ignored_count,
             "total_count": total_count,
             "test_cases": test_cases,
-            "verification_results": verification_results,
+            "verification_results": normalized_results,
             "execution_results": execution_results,
         }
+
+    @classmethod
+    def _is_ignorable_external_registration_failure(cls, test_case: dict, verification: dict) -> bool:
+        if not isinstance(verification, dict) or verification.get("passed") is not False:
+            return False
+        text = cls._case_text(test_case)
+        has_registration_intent = bool(
+            re.search(r"注册|registration|\bregister(?!ed)\b|create an account|sign up", text, re.I)
+        )
+        has_external_provider = bool(
+            re.search(r"google|github|sso|oauth|oidc|第三方|social login|external auth", text, re.I)
+        )
+        return has_registration_intent and has_external_provider
+
+    @staticmethod
+    def _case_text(test_case: dict) -> str:
+        if not isinstance(test_case, dict):
+            return ""
+        return " ".join([
+            str(test_case.get("scenario_id", "")),
+            str(test_case.get("feature_id", "")),
+            str(test_case.get("scenario_name", "")),
+            " ".join(str(step) for step in test_case.get("steps", [])),
+            " ".join(str(exp) for exp in test_case.get("expectations", [])),
+        ]).lower()
 
     def _llm_generate_report(self, report_data: dict, output_dir: str) -> str | None:
         """使用 LLM 生成 HTML 报告。LLM 不可用时返回 None。"""
@@ -374,9 +434,17 @@ class MyVerificationTool(VerificationToolInterface):
             "generated_time": report_data["generated_time"],
             "pass_rate": report_data["pass_rate"],
             "passed_count": report_data["passed_count"],
+            "failed_count": report_data["failed_count"],
+            "ignored_count": report_data["ignored_count"],
             "total_count": report_data["total_count"],
             "results": {
-                sid: {"passed": v.get("passed"), "reason": v.get("reason", "")}
+                sid: {
+                    "passed": v.get("passed"),
+                    "effective_status": v.get("effective_status", ""),
+                    "ignored": v.get("ignored", False),
+                    "reason": v.get("reason", ""),
+                    "ignore_reason": v.get("ignore_reason", ""),
+                }
                 for sid, v in report_data["verification_results"].items()
             },
             "test_cases": [
@@ -393,7 +461,7 @@ class MyVerificationTool(VerificationToolInterface):
 要求：
 1. 使用内联 CSS，美观现代（浅色背景、圆角卡片、状态标签带颜色）
 2. 包含：顶部概览（通过率）、详细用例列表
-3. 通过用例绿色标识，失败用例红色标识
+3. 通过用例绿色标识，失败用例红色标识，可忽略用例灰色标识且不计入失败统计
 4. 只输出合法 HTML，从 <!DOCTYPE html> 开始，不要 markdown 标记"""
 
         try:
@@ -426,6 +494,8 @@ class MyVerificationTool(VerificationToolInterface):
         """兜底：使用 HTML 模板生成报告，不依赖 LLM。"""
         passed_count = report_data["passed_count"]
         total_count = report_data["total_count"]
+        failed_count = report_data.get("failed_count", max(total_count - passed_count, 0))
+        ignored_count = report_data.get("ignored_count", 0)
         pass_rate = report_data["pass_rate"]
         generated_time = report_data["generated_time"]
         target_url = report_data["target_url"]
@@ -439,10 +509,17 @@ class MyVerificationTool(VerificationToolInterface):
             sid = html_module.escape(str(tc.get("scenario_id", "")))
             name = html_module.escape(str(tc.get("scenario_name", "")))
             v = verification_results.get(tc.get("scenario_id", ""), {})
+            ignored = v.get("ignored") is True
             passed = v.get("passed", False)
             reason = html_module.escape(str(v.get("reason", "")))
-            status_label = "通过" if passed else "失败"
-            status_color = "#4caf50" if passed else "#f44336"
+            if ignored:
+                status_label = "可忽略"
+                status_color = "#78909c"
+                ignore_reason = str(v.get("ignore_reason", "第三方注册失败不计入失败统计"))
+                reason = html_module.escape(f"{v.get('reason', '')}（{ignore_reason}）")
+            else:
+                status_label = "通过" if passed else "失败"
+                status_color = "#4caf50" if passed else "#f44336"
             rows_html += f"""
             <tr>
                 <td>{sid}</td>
@@ -454,11 +531,19 @@ class MyVerificationTool(VerificationToolInterface):
         # 如果没有 test_cases 但有 verification_results，也从 results 生成行
         if not test_cases and verification_results:
             for sid, v in verification_results.items():
+                ignored = v.get("ignored") is True
                 passed = v.get("passed", False)
                 reason = html_module.escape(str(v.get("reason", "")))
+                if ignored:
+                    ignore_reason = str(v.get("ignore_reason", "第三方注册失败不计入失败统计"))
+                    reason = html_module.escape(f"{v.get('reason', '')}（{ignore_reason}）")
                 sid_esc = html_module.escape(str(sid))
-                status_label = "通过" if passed else "失败"
-                status_color = "#4caf50" if passed else "#f44336"
+                if ignored:
+                    status_label = "可忽略"
+                    status_color = "#78909c"
+                else:
+                    status_label = "通过" if passed else "失败"
+                    status_color = "#4caf50" if passed else "#f44336"
                 rows_html += f"""
             <tr>
                 <td>{sid_esc}</td>
@@ -478,7 +563,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .container {{ max-width: 960px; margin: 0 auto; }}
 h1 {{ color: #333; text-align: center; }}
 .summary {{ background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-.summary-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; text-align: center; }}
+.summary-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; text-align: center; }}
 .summary-grid .metric {{ font-size: 28px; font-weight: bold; color: #1976d2; }}
 .summary-grid .label {{ font-size: 14px; color: #666; margin-top: 4px; }}
 table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
@@ -495,7 +580,8 @@ tr:hover {{ background: #f9f9f9; }}
 <div class="summary-grid">
 <div><div class="metric">{pass_rate}</div><div class="label">通过率</div></div>
 <div><div class="metric">{passed_count}</div><div class="label">通过用例</div></div>
-<div><div class="metric">{total_count - passed_count}</div><div class="label">失败用例</div></div>
+<div><div class="metric">{failed_count}</div><div class="label">失败用例</div></div>
+<div><div class="metric">{ignored_count}</div><div class="label">可忽略用例</div></div>
 </div>
 </div>
 <table>

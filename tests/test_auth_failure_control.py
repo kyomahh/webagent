@@ -4,9 +4,11 @@ from agent.planner import (
     _auth_blocker_decision,
     _case_produces,
     _case_requires,
+    _find_registration_case,
     _has_inline_login_step,
     _is_login_case,
 )
+from agent.replanner import _result_sets
 from core.fixed_account import TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD
 from tools.impl.execution_browser_use_impl import BrowserUseExecutionTool
 
@@ -41,6 +43,22 @@ def _external_auth_case(provider="Google", scenario_id="TS_F002_001"):
     }
 
 
+def _core_registration_case(scenario_id="TS_REG_001"):
+    return {
+        "scenario_id": scenario_id,
+        "feature_id": "F001",
+        "scenario_name": "New User Registration",
+        "type": "setup",
+        "steps": [
+            "Open the login page",
+            "Click Create an account",
+            "Enter username, email and password",
+            "Click Register",
+        ],
+        "expectations": ["The user account is created successfully"],
+    }
+
+
 def test_inline_login_business_case_can_establish_auth_session():
     test_case = _inline_login_case()
 
@@ -55,6 +73,19 @@ def test_external_auth_case_is_not_primary_login_prerequisite():
     assert _is_login_case(test_case) is False
     assert _case_requires(test_case) == set()
     assert _case_produces(test_case) == set()
+
+    test_case["produces"] = ["registered_account", "authenticated_session"]
+    assert _case_produces(test_case) == set()
+
+
+def test_find_registration_case_ignores_external_auth_registration():
+    google_case = _external_auth_case("Google", "TS_F002_001")
+    github_case = _external_auth_case("GitHub", "TS_F002_002")
+
+    assert _find_registration_case([google_case, github_case]) is None
+
+    core_case = _core_registration_case("TS_REG_001")
+    assert _find_registration_case([google_case, core_case, github_case]) == core_case
 
 
 def test_permanent_auth_failure_stops_dependent_suite():
@@ -100,6 +131,26 @@ def test_external_auth_failure_does_not_stop_suite():
         )
 
         assert decision is None
+
+
+def test_replanner_statistics_marks_external_registration_failure_ignored():
+    google_case = _external_auth_case("Google", "TS_F002_001")
+    business_case = _inline_login_case("TS_F005_002")
+
+    passed_ids, failed_ids, ignored_ids = _result_sets(
+        [google_case, business_case],
+        {
+            "TS_F002_001": {
+                "passed": False,
+                "reason": "Google OAuth account cannot complete signup in test env",
+            },
+            "TS_F005_002": {"passed": True, "reason": "ok"},
+        },
+    )
+
+    assert passed_ids == {"TS_F005_002"}
+    assert failed_ids == set()
+    assert ignored_ids == {"TS_F002_001"}
 
 
 def test_transient_auth_failure_retries_same_case_before_limit():

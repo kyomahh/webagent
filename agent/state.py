@@ -1,6 +1,10 @@
 import operator
 from typing import Annotated
-from typing_extensions import TypedDict
+
+try:
+    from typing_extensions import TypedDict
+except ModuleNotFoundError:
+    from typing import TypedDict
 
 
 def _limit_past_steps(old: list[tuple[str, str]], new: list[tuple[str, str]]) -> list[tuple[str, str]]:

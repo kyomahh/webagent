@@ -73,7 +73,10 @@ def _registration_case_score(test_case: dict) -> int:
 
 
 def _find_registration_case(test_cases: list[dict]) -> dict | None:
-    candidates = [tc for tc in test_cases if _is_registration_case(tc)]
+    candidates = [
+        tc for tc in test_cases
+        if _is_registration_case(tc) and not _is_external_auth_case(tc)
+    ]
     if not candidates:
         return None
     return max(candidates, key=_registration_case_score)
@@ -166,12 +169,13 @@ def _is_external_auth_case(test_case: dict) -> bool:
 
 
 def _case_requires(test_case: dict) -> set[str]:
+    if _is_external_auth_case(test_case):
+        return set()
+
     explicit = test_case.get("requires", [])
     if isinstance(explicit, list) and explicit:
         return {str(item) for item in explicit}
 
-    if _is_external_auth_case(test_case):
-        return set()
     if _is_registration_case(test_case):
         return set()
     if _is_login_case(test_case):
@@ -182,12 +186,13 @@ def _case_requires(test_case: dict) -> set[str]:
 
 
 def _case_produces(test_case: dict) -> set[str]:
+    if _is_external_auth_case(test_case):
+        return set()
+
     explicit = test_case.get("produces", [])
     if isinstance(explicit, list) and explicit:
         return {str(item) for item in explicit}
 
-    if _is_external_auth_case(test_case):
-        return set()
     if _is_registration_case(test_case):
         return {"registered_account", "authenticated_session"}
     if _is_login_case(test_case):

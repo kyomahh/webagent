@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TEST_CASES_PATH = PROJECT_ROOT / "output" / "test_cases_manual1.json"
+DEFAULT_TEST_CASES_PATH = PROJECT_ROOT / "output" / "test_cases_manual.json"
 LAST_CREDENTIALS_FILENAME = "last_test_credentials.json"
 
 TEST_EMAIL_PATTERN = re.compile(
@@ -118,13 +118,13 @@ def write_credentials_file(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Randomize account credentials in test_cases_manual1.json.",
+        description="Randomize account credentials in test_cases_manual.json.",
     )
     parser.add_argument(
         "path",
         nargs="?",
         default=str(DEFAULT_TEST_CASES_PATH),
-        help="Path to test-case JSON. Default: output/test_cases_manual1.json",
+        help="Path to test-case JSON. Default: output/test_cases_manual.json",
     )
     args = parser.parse_args()
 

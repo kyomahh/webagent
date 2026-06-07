@@ -368,9 +368,37 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
 
         return False
 
+    def _is_external_auth_case(test_case: dict) -> bool:
+        """识别 Google/GitHub/OAuth 等第三方认证用例。"""
+        text = " ".join([
+            str(test_case.get("scenario_id", "")),
+            str(test_case.get("feature_id", "")),
+            str(test_case.get("scenario_name", "")),
+            " ".join(str(step) for step in test_case.get("steps", [])),
+            " ".join(str(exp) for exp in test_case.get("expectations", [])),
+        ]).lower()
+        return any(
+            marker in text
+            for marker in [
+                "sso",
+                "oauth",
+                "oidc",
+                "第三方",
+                "social login",
+                "external auth",
+                "google",
+                "github",
+                "microsoft",
+            ]
+        )
+
+    def _is_core_registration_case(test_case: dict) -> bool:
+        """只把本地账号注册当作需要改写/重试的注册前置。"""
+        return _is_registration_case(test_case) and not _is_external_auth_case(test_case)
+
     def _ensure_registration_entry_steps(test_case: dict) -> dict:
         """注册用例每次执行都先回到首页/登录页，再点击 Create an account 进入注册页。"""
-        if not _is_registration_case(test_case):
+        if not _is_core_registration_case(test_case):
             return test_case
 
         adapted = copy.deepcopy(test_case)
@@ -413,6 +441,8 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
 
         # 注册失败提示 Terms/Privacy 时，重试策略必须先看原用例是正向还是负向。
         if re.search(r"(服务条款|隐私|terms|privacy|未接受|accept)", failure_text, re.I):
+            if not _is_core_registration_case(adapted):
+                return adapted
             if _test_case_negative_terms_intent(adapted):
                 adapted["retry_hint"] = (
                     "该用例包含未接受 Terms/Privacy 的负向测试意图；"
@@ -453,11 +483,13 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                 documents = state.get("documents", [])
                 persist_dir = args.get("persist_dir", state.get("chroma_dir", "chroma_db"))
                 path = rag_impl.build_knowledge_base(documents, persist_dir)
+                with state_update_lock:
+                    updates["chroma_dir"] = path
                 summary = f"知识库已构建: {path}，基于 {len(documents)} 个文档"
 
             elif action == "extract_features":
-                vector_store_path = args.get(
-                    "vector_store_path", state.get("chroma_dir", "chroma_db")
+                vector_store_path = state.get("chroma_dir") or args.get(
+                    "vector_store_path", "chroma_db"
                 )
                 features = rag_impl.extract_features(vector_store_path)
                 with state_update_lock:
@@ -466,8 +498,8 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
 
             elif action == "generate_scenarios":
                 features = state.get("features", [])
-                vector_store_path = args.get(
-                    "vector_store_path", state.get("chroma_dir", "chroma_db")
+                vector_store_path = state.get("chroma_dir") or args.get(
+                    "vector_store_path", "chroma_db"
                 )
                 cases = rag_impl.generate_scenarios(features, vector_store_path)
                 with state_update_lock:

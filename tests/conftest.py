@@ -2,10 +2,154 @@
 
 import sys
 import os
+import types
 import pytest
 
 # 确保项目根目录在 sys.path 中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _install_optional_dependency_test_stubs():
+    """为本地 helper 测试提供最小 LangChain 兼容层；真实依赖存在时不生效。"""
+    try:
+        from langchain_core.tools import tool  # noqa: F401
+        from langchain_core.documents import Document  # noqa: F401
+    except ModuleNotFoundError:
+        langchain_core = types.ModuleType("langchain_core")
+        tools_mod = types.ModuleType("langchain_core.tools")
+        documents_mod = types.ModuleType("langchain_core.documents")
+        messages_mod = types.ModuleType("langchain_core.messages")
+
+        class Document:
+            def __init__(self, page_content="", metadata=None):
+                self.page_content = page_content
+                self.metadata = metadata or {}
+
+        class _ToolWrapper:
+            def __init__(self, func):
+                self.func = func
+                self.__name__ = getattr(func, "__name__", "tool")
+                self.__doc__ = getattr(func, "__doc__", None)
+
+            def __call__(self, *args, **kwargs):
+                return self.func(*args, **kwargs)
+
+            def invoke(self, tool_input=None):
+                if isinstance(tool_input, dict):
+                    return self.func(**tool_input)
+                if tool_input is None:
+                    return self.func()
+                return self.func(tool_input)
+
+        def tool(fn=None, *args, **kwargs):
+            def decorate(func):
+                return _ToolWrapper(func)
+            return decorate(fn) if callable(fn) else decorate
+
+        class _Message:
+            def __init__(self, content="", **kwargs):
+                self.content = content
+
+        tools_mod.tool = tool
+        documents_mod.Document = Document
+        messages_mod.HumanMessage = _Message
+        messages_mod.SystemMessage = _Message
+        sys.modules.setdefault("langchain_core", langchain_core)
+        sys.modules["langchain_core.tools"] = tools_mod
+        sys.modules["langchain_core.documents"] = documents_mod
+        sys.modules["langchain_core.messages"] = messages_mod
+
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter  # noqa: F401
+    except ModuleNotFoundError:
+        splitters_mod = types.ModuleType("langchain_text_splitters")
+
+        class RecursiveCharacterTextSplitter:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def split_documents(self, documents):
+                return list(documents)
+
+        splitters_mod.RecursiveCharacterTextSplitter = RecursiveCharacterTextSplitter
+        sys.modules["langchain_text_splitters"] = splitters_mod
+
+    try:
+        from langchain_community.embeddings import ZhipuAIEmbeddings  # noqa: F401
+        from langchain_community.vectorstores import Chroma  # noqa: F401
+    except ModuleNotFoundError:
+        community_mod = types.ModuleType("langchain_community")
+        embeddings_mod = types.ModuleType("langchain_community.embeddings")
+        vectorstores_mod = types.ModuleType("langchain_community.vectorstores")
+
+        class ZhipuAIEmbeddings:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class _Collection:
+            def __init__(self, documents=None):
+                self._documents = list(documents or [])
+
+            def get(self, include=None):
+                return {
+                    "documents": [doc.page_content for doc in self._documents],
+                    "metadatas": [doc.metadata for doc in self._documents],
+                }
+
+        class Chroma:
+            def __init__(self, *args, **kwargs):
+                self._documents = list(kwargs.get("documents") or [])
+                self._collection = _Collection(self._documents)
+
+            @classmethod
+            def from_documents(cls, documents, *args, **kwargs):
+                instance = cls(*args, **kwargs)
+                instance.add_documents(documents)
+                return instance
+
+            def add_documents(self, documents):
+                self._documents.extend(list(documents))
+                self._collection = _Collection(self._documents)
+
+            def similarity_search(self, query, k=4):
+                return self._documents[:k]
+
+            def similarity_search_with_score(self, query, k=4):
+                return [(doc, 0.0) for doc in self.similarity_search(query, k=k)]
+
+            def persist(self):
+                pass
+
+        embeddings_mod.ZhipuAIEmbeddings = ZhipuAIEmbeddings
+        vectorstores_mod.Chroma = Chroma
+        sys.modules.setdefault("langchain_community", community_mod)
+        sys.modules["langchain_community.embeddings"] = embeddings_mod
+        sys.modules["langchain_community.vectorstores"] = vectorstores_mod
+
+    try:
+        from dotenv import load_dotenv  # noqa: F401
+    except ModuleNotFoundError:
+        dotenv_mod = types.ModuleType("dotenv")
+        dotenv_mod.load_dotenv = lambda *args, **kwargs: None
+        sys.modules["dotenv"] = dotenv_mod
+
+    try:
+        from langchain_openai import ChatOpenAI  # noqa: F401
+    except ModuleNotFoundError:
+        openai_mod = types.ModuleType("langchain_openai")
+
+        class ChatOpenAI:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def invoke(self, prompt):
+                raise RuntimeError("ChatOpenAI test stub does not call external LLMs")
+
+        openai_mod.ChatOpenAI = ChatOpenAI
+        sys.modules["langchain_openai"] = openai_mod
+
+
+_install_optional_dependency_test_stubs()
 
 from tools.stub.rag_stub import StubRagTool
 from tools.stub.execution_stub import StubExecutionTool

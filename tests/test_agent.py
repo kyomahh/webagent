@@ -66,6 +66,12 @@ class TestPlannerPrompt:
         assert "重试" in prompt
         assert "3" in prompt
 
+    def test_external_auth_is_not_registration_prerequisite(self):
+        prompt = build_planner_prompt(target_url="https://x.com")
+        assert "第三方注册" in prompt
+        assert "不作为全局注册前置" in prompt
+        assert "失败后继续执行其他用例" in prompt
+
 
 class TestReplannerPrompt:
 
@@ -85,6 +91,11 @@ class TestReplannerPrompt:
         prompt = build_replanner_prompt(max_retries=3)
         assert "重试" in prompt
         assert "3" in prompt
+
+    def test_mentions_ignorable_external_auth_failures(self):
+        prompt = build_replanner_prompt()
+        assert "第三方注册失败不算主流程注册失败" in prompt
+        assert "可忽略" in prompt
 
 
 class TestAvailableActions:
@@ -184,6 +195,66 @@ class TestExecutorNode:
         result = self.executor(state)
         assert "past_steps" in result
         assert "知识库" in result["past_steps"][0][1]
+        assert result["chroma_dir"] == "chroma_db"
+
+    def test_build_knowledge_base_updates_actual_chroma_dir(self):
+        """后续 RAG 步骤必须使用 build_knowledge_base 返回的实际向量库目录。"""
+        self.rag.build_knowledge_base = lambda documents, persist_dir=None: "chroma_db/manual"
+
+        state = {
+            "current_task": {"action": "build_knowledge_base", "args": {"persist_dir": "chroma_db"}},
+            "documents": [{"content": "test", "source": "/repo/manual/docs.txt", "metadata": {}}],
+            "chroma_dir": "chroma_db",
+        }
+
+        result = self.executor(state)
+
+        assert result["chroma_dir"] == "chroma_db/manual"
+
+    def test_extract_and_generate_use_state_chroma_dir_over_task_args(self):
+        """即使 planner 传了旧路径，executor 也要优先使用状态中的实际向量库路径。"""
+        used_paths = []
+
+        def extract_features(vector_store_path):
+            used_paths.append(("extract", vector_store_path))
+            return [{"feature_id": "F001", "feature_name": "登录", "description": "desc"}]
+
+        def generate_scenarios(features, vector_store_path):
+            used_paths.append(("generate", vector_store_path))
+            return [{
+                "scenario_id": "TS_F001_001",
+                "feature_id": "F001",
+                "scenario_name": "测试 登录",
+                "steps": ["打开页面"],
+                "expectations": ["正常"],
+            }]
+
+        self.rag.extract_features = extract_features
+        self.rag.generate_scenarios = generate_scenarios
+
+        extract_state = {
+            "current_task": {
+                "action": "extract_features",
+                "args": {"vector_store_path": "chroma_db"},
+            },
+            "chroma_dir": "chroma_db/manual",
+        }
+        generate_state = {
+            "current_task": {
+                "action": "generate_scenarios",
+                "args": {"vector_store_path": "chroma_db"},
+            },
+            "features": [{"feature_id": "F001", "feature_name": "登录", "description": "desc"}],
+            "chroma_dir": "chroma_db/manual",
+        }
+
+        self.executor(extract_state)
+        self.executor(generate_state)
+
+        assert used_paths == [
+            ("extract", "chroma_db/manual"),
+            ("generate", "chroma_db/manual"),
+        ]
 
     def test_extract_features(self):
         state = {
