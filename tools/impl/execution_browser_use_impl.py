@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -68,18 +69,24 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         自主观察页面并决定具体元素。
         """
         test_case = test_case or {}
-        raw_steps = [str(step).strip() for step in test_case.get("steps", []) if str(step).strip()]
+        raw_steps = [
+            str(step).strip()
+            for step in test_case.get("steps", [])
+            if str(step).strip()
+        ]
 
-        plan: list[dict] = [{
-            "step_id": 1,
-            "action_type": "navigate",
-            "action_detail": "打开目标网站",
-            "target_element": getattr(self.config, "target_url", "") or "",
-            "element_type": "page",
-            "value": "",
-            "fallback_text": "",
-            "original_step": "",
-        }]
+        plan: list[dict] = [
+            {
+                "step_id": 1,
+                "action_type": "navigate",
+                "action_detail": "打开目标网站",
+                "target_element": getattr(self.config, "target_url", "") or "",
+                "element_type": "page",
+                "value": "",
+                "fallback_text": "",
+                "original_step": "",
+            }
+        ]
 
         for raw_step in raw_steps:
             action_type = self._infer_browser_use_action_type(raw_step)
@@ -93,43 +100,51 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 if action_type == "type"
                 else raw_step
             ) or raw_step
-            optional = action_type == "type" and self._is_optional_type_target(target, raw_step)
+            optional = action_type == "type" and self._is_optional_type_target(
+                target, raw_step
+            )
             if optional:
                 action_type = "wait"
                 value = ""
-                action_detail = (
-                    f"可选输入字段 {target} 不强制填写；不要向当前已聚焦或不匹配的输入框输入内容，保持原状态并继续"
-                )
+                action_detail = f"可选输入字段 {target} 不强制填写；不要向当前已聚焦或不匹配的输入框输入内容，保持原状态并继续"
                 fallback_text = ""
                 field_guard = ""
             else:
                 action_detail = raw_step
                 fallback_text = raw_step
-                field_guard = self._field_guard_for_type_target(target) if action_type == "type" else ""
-            plan.append({
-                "step_id": len(plan) + 1,
-                "action_type": action_type,
-                "action_detail": action_detail,
-                "target_element": target,
-                "element_type": self._default_element_type(action_type),
-                "value": value,
-                "fallback_text": fallback_text,
-                "original_step": raw_step,
-                "optional": optional,
-                "field_guard": field_guard,
-            })
+                field_guard = (
+                    self._field_guard_for_type_target(target)
+                    if action_type == "type"
+                    else ""
+                )
+            plan.append(
+                {
+                    "step_id": len(plan) + 1,
+                    "action_type": action_type,
+                    "action_detail": action_detail,
+                    "target_element": target,
+                    "element_type": self._default_element_type(action_type),
+                    "value": value,
+                    "fallback_text": fallback_text,
+                    "original_step": raw_step,
+                    "optional": optional,
+                    "field_guard": field_guard,
+                }
+            )
 
         if not plan or plan[-1]["action_type"] != "screenshot":
-            plan.append({
-                "step_id": len(plan) + 1,
-                "action_type": "screenshot",
-                "action_detail": "保存当前页面证据用于验证",
-                "target_element": "当前页面",
-                "element_type": "page",
-                "value": "",
-                "fallback_text": "",
-                "original_step": "",
-            })
+            plan.append(
+                {
+                    "step_id": len(plan) + 1,
+                    "action_type": "screenshot",
+                    "action_detail": "保存当前页面证据用于验证",
+                    "target_element": "当前页面",
+                    "element_type": "page",
+                    "value": "",
+                    "fallback_text": "",
+                    "original_step": "",
+                }
+            )
 
         return self._insert_stabilization_waits(plan)
 
@@ -138,10 +153,14 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         lower = step_text.lower()
         if BrowserUseExecutionTool._is_negative_interaction_step(step_text):
             return "wait"
-        if any(word in step_text for word in ["等待", "暂停", "稍等"]) or "wait" in lower:
+        if (
+            any(word in step_text for word in ["等待", "暂停", "稍等"])
+            or "wait" in lower
+        ):
             return "wait"
         if any(word in step_text for word in ["勾选", "选中", "复选框"]) or any(
-            word in lower for word in ["checkbox", "terms of service", "terms", "accept"]
+            word in lower
+            for word in ["checkbox", "terms of service", "terms", "accept"]
         ):
             return "click"
         if any(word in step_text for word in ["截图", "验证", "检查", "确认"]) or any(
@@ -154,9 +173,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
             return "type"
         if any(word in step_text for word in ["选择", "下拉"]) or "select" in lower:
             return "select"
-        if any(word in step_text for word in ["访问", "进入", "打开页面", "打开网站"]) or any(
-            word in lower for word in ["navigate", "visit", "open page", "go to"]
-        ):
+        if any(
+            word in step_text for word in ["访问", "进入", "打开页面", "打开网站"]
+        ) or any(word in lower for word in ["navigate", "visit", "open page", "go to"]):
             return "navigate"
         return "click"
 
@@ -180,11 +199,14 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         if not (english_negative or chinese_negative):
             return False
 
-        return re.search(
-            r"(click|check|select|accept|agree|choose|enable|点击|勾选|选中|选择|接受|同意|复选框|checkbox)",
-            text,
-            re.I,
-        ) is not None
+        return (
+            re.search(
+                r"(click|check|select|accept|agree|choose|enable|点击|勾选|选中|选择|接受|同意|复选框|checkbox)",
+                text,
+                re.I,
+            )
+            is not None
+        )
 
     @staticmethod
     def _insert_stabilization_waits(plan: list[dict]) -> list[dict]:
@@ -198,20 +220,19 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 if stabilized
                 else ""
             )
-            if (
-                action_type == "screenshot"
-                and previous_action in interactive_actions
-            ):
-                stabilized.append({
-                    "step_id": 0,
-                    "action_type": "wait",
-                    "action_detail": "等待页面状态稳定后再保存证据",
-                    "target_element": "当前页面",
-                    "element_type": "page",
-                    "value": BrowserUseExecutionTool._stabilization_wait_seconds(),
-                    "fallback_text": "",
-                    "original_step": str(step.get("original_step", "") or ""),
-                })
+            if action_type == "screenshot" and previous_action in interactive_actions:
+                stabilized.append(
+                    {
+                        "step_id": 0,
+                        "action_type": "wait",
+                        "action_detail": "等待页面状态稳定后再保存证据",
+                        "target_element": "当前页面",
+                        "element_type": "page",
+                        "value": BrowserUseExecutionTool._stabilization_wait_seconds(),
+                        "fallback_text": "",
+                        "original_step": str(step.get("original_step", "") or ""),
+                    }
+                )
             stabilized.append(step)
 
         for idx, step in enumerate(stabilized, 1):
@@ -265,7 +286,10 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
     @staticmethod
     def _is_optional_type_target(target: str, step_text: str) -> bool:
         text = f"{target} {step_text}".lower()
-        return any(keyword in text for keyword in ["name", "username", "user name", "姓名", "用户名"])
+        return any(
+            keyword in text
+            for keyword in ["name", "username", "user name", "姓名", "用户名"]
+        )
 
     @staticmethod
     def _field_guard_for_type_target(target: str) -> str:
@@ -273,7 +297,10 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         if not target_lower:
             return ""
         blocked = []
-        if any(keyword in target_lower for keyword in ["name", "username", "user name", "姓名", "用户名"]):
+        if any(
+            keyword in target_lower
+            for keyword in ["name", "username", "user name", "姓名", "用户名"]
+        ):
             blocked = ["email", "password", "密码", "邮箱"]
         elif "email" in target_lower or "邮箱" in target_lower:
             blocked = ["password", "name", "username", "密码", "姓名", "用户名"]
@@ -287,26 +314,35 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
             "If no matching field exists, skip this step and continue."
         )
 
-    def execute(self, plan: list[dict], target_url: str,
-                memory: dict | None = None) -> dict:
+    def execute(
+        self, plan: list[dict], target_url: str, memory: dict | None = None
+    ) -> dict:
         """执行测试计划。
 
         只使用 Browser-use Agent，不调用旧 Playwright executor。
         """
         return self._execute_with_browser_use_agent(plan, target_url, memory)
 
-    def _execute_with_browser_use_agent(self, plan: list[dict], target_url: str,
-                                        memory: dict | None = None) -> dict:
+    def _execute_with_browser_use_agent(
+        self, plan: list[dict], target_url: str, memory: dict | None = None
+    ) -> dict:
         """使用 Browser-use Agent 执行测试计划。
 
         返回值保持 ExecutionToolInterface 兼容。
         """
-        runtime_config = (memory or {}).get("_config", {}) if isinstance(memory, dict) else {}
+        runtime_config = (
+            (memory or {}).get("_config", {}) if isinstance(memory, dict) else {}
+        )
         self.output_dir = runtime_config.get("output_dir") or self.output_dir
         self.headless = bool(runtime_config.get("headless", self.headless))
         os.makedirs(self.output_dir, exist_ok=True)
 
-        base_url = runtime_config.get("target_url") or target_url or getattr(self.config, "target_url", "") or ""
+        base_url = (
+            runtime_config.get("target_url")
+            or target_url
+            or getattr(self.config, "target_url", "")
+            or ""
+        )
         scenario_id = str(runtime_config.get("scenario_id") or "")
         normalized_plan = self._validate_and_fix_execute_plan(plan or [])
         memory = self._init_memory(memory)
@@ -324,10 +360,18 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         max_steps = max(12, len(normalized_plan) * 4)
         run_started_at: float | None = None
         agent = None
+        monitor_thread = None
 
         try:
             agent = self._create_browser_use_agent(Agent, task, llm)
             run_started_at = datetime.now().timestamp()
+
+            # 启动后台监听线程，实时保存生成的证据文件
+            monitor_thread = self._start_real_time_evidence_monitor(
+                scenario_id=scenario_id,
+                start_time=run_started_at,
+            )
+
             try:
                 run_result = agent.run(max_steps=max_steps)
             except TypeError:
@@ -340,6 +384,10 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 if self._browser_use_capture_final_state_enabled()
                 else {}
             )
+
+            # 停止后台监听线程，等待其完成
+            monitored_files = self._stop_real_time_evidence_monitor(monitor_thread)
+
             step_screenshot_files = self._copy_history_screenshots_to_output(
                 history,
                 scenario_id=scenario_id,
@@ -350,7 +398,12 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 scenario_id=scenario_id,
                 success=success,
             )
-            all_evidence_files = self._merge_evidence_paths(step_screenshot_files, evidence_files)
+            # 合并实时监听收集的文件和最后收集的文件
+            all_evidence_files = self._merge_evidence_paths(
+                step_screenshot_files,
+                evidence_files,
+                monitored_files,
+            )
             results, screenshots = self._history_to_results(
                 normalized_plan,
                 history,
@@ -367,6 +420,10 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
 
             return {"results": results, "memory": memory, "screenshots": screenshots}
         except Exception as exc:
+            # 确保后台线程被停止
+            if monitor_thread is not None:
+                self._stop_real_time_evidence_monitor(monitor_thread)
+
             history = getattr(agent, "history", None) if agent is not None else None
             step_screenshot_files = self._copy_history_screenshots_to_output(
                 history,
@@ -382,7 +439,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 if run_started_at is not None
                 else []
             )
-            all_evidence_files = self._merge_evidence_paths(step_screenshot_files, evidence_files)
+            all_evidence_files = self._merge_evidence_paths(
+                step_screenshot_files, evidence_files
+            )
             return self._agent_failure_result(
                 normalized_plan,
                 memory,
@@ -395,6 +454,7 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
     def _load_browser_use_agent():
         try:
             from browser_use import Agent
+
             return Agent
         except Exception as exc:
             raise RuntimeError(
@@ -408,10 +468,13 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
     def _browser_use_execution_model_name(self) -> str:
         """Browser-use 视觉模式下，主 LLM 必须是支持图片输入的模型。"""
         if self._browser_use_vision_enabled():
-            return os.environ.get(
-                "BROWSER_USE_VISION_MODEL",
-                DEFAULT_BROWSER_USE_VISION_MODEL,
-            ).strip() or DEFAULT_BROWSER_USE_VISION_MODEL
+            return (
+                os.environ.get(
+                    "BROWSER_USE_VISION_MODEL",
+                    DEFAULT_BROWSER_USE_VISION_MODEL,
+                ).strip()
+                or DEFAULT_BROWSER_USE_VISION_MODEL
+            )
         return getattr(self.config, "model_name", "glm-4.7")
 
     @staticmethod
@@ -421,7 +484,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
 
     @staticmethod
     def _browser_use_capture_final_state_enabled() -> bool:
-        value = os.environ.get("BROWSER_USE_CAPTURE_FINAL_STATE", "false").strip().lower()
+        value = (
+            os.environ.get("BROWSER_USE_CAPTURE_FINAL_STATE", "false").strip().lower()
+        )
         return value in {"1", "true", "yes", "on"}
 
     def _build_browser_use_llm(self, model_name: str):
@@ -491,7 +556,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                     if self.frequency_penalty is not None:
                         model_params["frequency_penalty"] = self.frequency_penalty
                     if self.max_completion_tokens is not None:
-                        model_params["max_completion_tokens"] = self.max_completion_tokens
+                        model_params["max_completion_tokens"] = (
+                            self.max_completion_tokens
+                        )
                     if self.top_p is not None:
                         model_params["top_p"] = self.top_p
                     if self.seed is not None:
@@ -516,13 +583,23 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                         ),
                     }
 
-                    if self.add_schema_to_system_prompt and openai_messages and openai_messages[0]["role"] == "system":
-                        schema_text = f"\n<json_schema>\n{response_format}\n</json_schema>"
+                    if (
+                        self.add_schema_to_system_prompt
+                        and openai_messages
+                        and openai_messages[0]["role"] == "system"
+                    ):
+                        schema_text = (
+                            f"\n<json_schema>\n{response_format}\n</json_schema>"
+                        )
                         if isinstance(openai_messages[0]["content"], str):
                             openai_messages[0]["content"] += schema_text
                         elif isinstance(openai_messages[0]["content"], Iterable):
-                            openai_messages[0]["content"] = list(openai_messages[0]["content"]) + [
-                                ChatCompletionContentPartTextParam(text=schema_text, type="text")
+                            openai_messages[0]["content"] = list(
+                                openai_messages[0]["content"]
+                            ) + [
+                                ChatCompletionContentPartTextParam(
+                                    text=schema_text, type="text"
+                                )
                             ]
 
                     if self.dont_force_structured_output:
@@ -562,11 +639,17 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 except ModelProviderError:
                     raise
                 except RateLimitError as exc:
-                    raise ModelRateLimitError(message=exc.message, model=self.name) from exc
+                    raise ModelRateLimitError(
+                        message=exc.message, model=self.name
+                    ) from exc
                 except APIConnectionError as exc:
                     raise ModelProviderError(message=str(exc), model=self.name) from exc
                 except APIStatusError as exc:
-                    raise ModelProviderError(message=exc.message, status_code=exc.status_code, model=self.name) from exc
+                    raise ModelProviderError(
+                        message=exc.message,
+                        status_code=exc.status_code,
+                        model=self.name,
+                    ) from exc
                 except Exception as exc:
                     raise ModelProviderError(message=str(exc), model=self.name) from exc
 
@@ -574,7 +657,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
             def _extract_json_object(text: str) -> str:
                 raw = (text or "").strip()
                 if raw.startswith("```"):
-                    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL | re.I)
+                    fenced = re.search(
+                        r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL | re.I
+                    )
                     if fenced:
                         raw = fenced.group(1).strip()
 
@@ -608,7 +693,7 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                     elif char == "}":
                         depth -= 1
                         if depth == 0:
-                            candidate = raw[start:index + 1]
+                            candidate = raw[start : index + 1]
                             try:
                                 json.loads(candidate)
                                 return candidate
@@ -640,7 +725,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                             or screenshot_args.get("name")
                             or "browser_use_evidence"
                         ),
-                        "print_background": bool(screenshot_args.get("print_background", True)),
+                        "print_background": bool(
+                            screenshot_args.get("print_background", True)
+                        ),
                         "landscape": bool(screenshot_args.get("landscape", False)),
                         "scale": float(screenshot_args.get("scale", 1.0)),
                         "paper_format": str(screenshot_args.get("paper_format", "A4")),
@@ -665,22 +752,31 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         )
         requested = os.environ.get("BROWSER_USE_FALLBACK_MODEL", "").strip()
         if self._browser_use_vision_enabled():
-            candidates = [requested] if requested else [
-                model for model in VISION_CAPABLE_MODELS if model != primary
-            ]
+            candidates = (
+                [requested]
+                if requested
+                else [model for model in VISION_CAPABLE_MODELS if model != primary]
+            )
         else:
-            candidates = [requested] if requested else [
-                "qwen-plus",
-                "glm-4.7-flash",
-                "deepseek-chat",
-                "glm-4-plus",
-            ]
+            candidates = (
+                [requested]
+                if requested
+                else [
+                    "qwen-plus",
+                    "glm-4.7-flash",
+                    "deepseek-chat",
+                    "glm-4-plus",
+                ]
+            )
 
         errors: list[str] = []
         for model_name in candidates:
             if not model_name or model_name == primary:
                 continue
-            if self._browser_use_vision_enabled() and model_name not in VISION_CAPABLE_MODELS:
+            if (
+                self._browser_use_vision_enabled()
+                and model_name not in VISION_CAPABLE_MODELS
+            ):
                 errors.append(f"{model_name}: 不是已注册视觉模型")
                 continue
             model_config = _MODEL_CONFIGS.get(model_name)
@@ -724,6 +820,7 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         if "browser_session" in params:
             try:
                 from browser_use import BrowserSession
+
                 browser_session = BrowserSession(
                     headless=self.headless,
                     minimum_wait_page_load_time=0.3,
@@ -737,13 +834,16 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 )
                 self._disable_browser_use_state_screenshots(browser_session)
                 self._browser_use_session = browser_session
-                return Agent(task=task, llm=llm, browser_session=browser_session, **agent_options)
+                return Agent(
+                    task=task, llm=llm, browser_session=browser_session, **agent_options
+                )
             except Exception:
                 pass
 
         if "browser" in params:
             try:
                 from browser_use import Browser, BrowserConfig
+
                 browser = Browser(config=BrowserConfig(headless=self.headless))
                 return Agent(task=task, llm=llm, browser=browser, **agent_options)
             except Exception:
@@ -753,8 +853,12 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
 
     @staticmethod
     def _configure_browser_use_screenshot_timeouts() -> None:
-        os.environ.setdefault("TIMEOUT_ScreenshotEvent", DEFAULT_BROWSER_USE_SCREENSHOT_TIMEOUT)
-        os.environ.setdefault("TIMEOUT_BrowserStateRequestEvent", DEFAULT_BROWSER_USE_STATE_TIMEOUT)
+        os.environ.setdefault(
+            "TIMEOUT_ScreenshotEvent", DEFAULT_BROWSER_USE_SCREENSHOT_TIMEOUT
+        )
+        os.environ.setdefault(
+            "TIMEOUT_BrowserStateRequestEvent", DEFAULT_BROWSER_USE_STATE_TIMEOUT
+        )
 
     @staticmethod
     def _browser_use_state_screenshots_enabled() -> bool:
@@ -771,7 +875,9 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
         if not callable(original_get_state):
             return browser_session
 
-        async def get_browser_state_summary_without_screenshot(*args: Any, **kwargs: Any) -> Any:
+        async def get_browser_state_summary_without_screenshot(
+            *args: Any, **kwargs: Any
+        ) -> Any:
             if args:
                 args = (False, *args[1:])
                 kwargs.pop("include_screenshot", None)
@@ -779,8 +885,16 @@ class BrowserUseExecutionTool(ExecutionToolInterface):
                 kwargs["include_screenshot"] = False
             return await original_get_state(*args, **kwargs)
 
-        setattr(browser_session, "_webagent_original_get_browser_state_summary", original_get_state)
-        setattr(browser_session, "get_browser_state_summary", get_browser_state_summary_without_screenshot)
+        setattr(
+            browser_session,
+            "_webagent_original_get_browser_state_summary",
+            original_get_state,
+        )
+        setattr(
+            browser_session,
+            "get_browser_state_summary",
+            get_browser_state_summary_without_screenshot,
+        )
         setattr(browser_session, "_webagent_state_screenshots_disabled", True)
         return browser_session
 
@@ -829,11 +943,15 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
 输出必须是纯 JSON。不要使用 Markdown，不要使用 ```json 代码块。第一个字符必须是 {，最后一个字符必须是 }。
 """.strip()
 
-    def _build_browser_use_task(self, plan: list[dict], target_url: str, memory: dict) -> str:
+    def _build_browser_use_task(
+        self, plan: list[dict], target_url: str, memory: dict
+    ) -> str:
         steps_text = []
         for step in plan:
             action_type = str(step.get("action_type") or "")
-            browser_use_action_type = "save_as_pdf" if action_type == "screenshot" else action_type
+            browser_use_action_type = (
+                "save_as_pdf" if action_type == "screenshot" else action_type
+            )
             parts = [
                 f"{step.get('step_id')}.",
                 f"[{browser_use_action_type}]",
@@ -895,24 +1013,28 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         for idx, raw_step in enumerate(plan or [], 1):
             if not isinstance(raw_step, dict):
                 continue
-            action_type = self._safe_step_text(raw_step, "action_type", "click").strip().lower()
+            action_type = (
+                self._safe_step_text(raw_step, "action_type", "click").strip().lower()
+            )
             if action_type not in VALID_ACTIONS:
                 action_type = "click"
-            fixed.append({
-                "step_id": self._safe_step_id(raw_step.get("step_id"), idx),
-                "action_type": action_type,
-                "action_detail": self._safe_step_text(raw_step, "action_detail"),
-                "target_element": self._safe_step_text(raw_step, "target_element"),
-                "element_type": (
-                    self._safe_step_text(raw_step, "element_type")
-                    or self._default_element_type(action_type)
-                ),
-                "value": self._safe_step_text(raw_step, "value"),
-                "fallback_text": self._safe_step_text(raw_step, "fallback_text"),
-                "original_step": self._safe_step_text(raw_step, "original_step"),
-                "optional": bool(raw_step.get("optional", False)),
-                "field_guard": self._safe_step_text(raw_step, "field_guard"),
-            })
+            fixed.append(
+                {
+                    "step_id": self._safe_step_id(raw_step.get("step_id"), idx),
+                    "action_type": action_type,
+                    "action_detail": self._safe_step_text(raw_step, "action_detail"),
+                    "target_element": self._safe_step_text(raw_step, "target_element"),
+                    "element_type": (
+                        self._safe_step_text(raw_step, "element_type")
+                        or self._default_element_type(action_type)
+                    ),
+                    "value": self._safe_step_text(raw_step, "value"),
+                    "fallback_text": self._safe_step_text(raw_step, "fallback_text"),
+                    "original_step": self._safe_step_text(raw_step, "original_step"),
+                    "optional": bool(raw_step.get("optional", False)),
+                    "field_guard": self._safe_step_text(raw_step, "field_guard"),
+                }
+            )
         return fixed
 
     def _safe_step_text(self, step: dict, key: str, default: str = "") -> str:
@@ -955,15 +1077,17 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         return memory
 
     def _record_action(self, memory: dict, step_result: dict) -> None:
-        memory.setdefault("action_history", []).append({
-            "step_id": step_result.get("step_id"),
-            "action_type": step_result.get("action_type", ""),
-            "action_detail": step_result.get("action_detail", ""),
-            "result": step_result.get("result", ""),
-            "success": bool(step_result.get("success", False)),
-            "screenshot_path": step_result.get("screenshot_path", ""),
-            "time": datetime.now().isoformat(timespec="seconds"),
-        })
+        memory.setdefault("action_history", []).append(
+            {
+                "step_id": step_result.get("step_id"),
+                "action_type": step_result.get("action_type", ""),
+                "action_detail": step_result.get("action_detail", ""),
+                "result": step_result.get("result", ""),
+                "success": bool(step_result.get("success", False)),
+                "screenshot_path": step_result.get("screenshot_path", ""),
+                "time": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
 
     @staticmethod
     def _make_failed_result(step: dict, reason: str) -> dict:
@@ -1072,21 +1196,25 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         browser_state = browser_state or {}
 
         memory.setdefault("agent_history", [])
-        memory["agent_history"].append({
-            "agent": "browser-use",
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "task": task,
-            "summary": summary[:4000],
-            "errors": errors,
-            "urls": urls,
-            "screenshots": screenshots,
-            "browser_state": browser_state,
-        })
+        memory["agent_history"].append(
+            {
+                "agent": "browser-use",
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "task": task,
+                "summary": summary[:4000],
+                "errors": errors,
+                "urls": urls,
+                "screenshots": screenshots,
+                "browser_state": browser_state,
+            }
+        )
 
         for result in results:
             self._record_action(memory, result)
 
-        memory["screenshots"] = list(dict.fromkeys(memory.get("screenshots", []) + screenshots))
+        memory["screenshots"] = list(
+            dict.fromkeys(memory.get("screenshots", []) + screenshots)
+        )
         current_url = browser_state.get("url") or (urls[-1] if urls else "")
         current_title = browser_state.get("title", "")
         current_text = browser_state.get("text_snippet") or summary
@@ -1097,8 +1225,12 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         memory["current_page"] = "browser_use"
         memory["browser_use_model"] = getattr(self, "_browser_use_model_name", "")
         memory["browser_use_vision_enabled"] = self._browser_use_vision_enabled()
-        memory["browser_use_fallback_model"] = getattr(self, "_browser_use_fallback_model_name", "")
-        memory["browser_use_final_success"] = self._extract_history_final_success(history)
+        memory["browser_use_fallback_model"] = getattr(
+            self, "_browser_use_fallback_model_name", ""
+        )
+        memory["browser_use_final_success"] = self._extract_history_final_success(
+            history
+        )
         memory["browser_use_summary"] = summary[:4000]
         memory["browser_use_errors"] = errors
         memory["browser_use_page"] = {
@@ -1108,16 +1240,18 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
             "errors": browser_state.get("errors", errors),
             "source": "browser_use",
         }
-        memory.setdefault("page_states", []).append({
-            "page": "browser_use",
-            "authenticated": None,
-            "url": current_url,
-            "title": current_title,
-            "text": current_text[:1000],
-            "action_type": "browser_use",
-            "result": current_text[:1000],
-            "time": datetime.now().isoformat(timespec="seconds"),
-        })
+        memory.setdefault("page_states", []).append(
+            {
+                "page": "browser_use",
+                "authenticated": None,
+                "url": current_url,
+                "title": current_title,
+                "text": current_text[:1000],
+                "action_type": "browser_use",
+                "result": current_text[:1000],
+                "time": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
         if self.session is not None:
             try:
                 self.session.browser_use_state = memory["browser_use_page"]
@@ -1133,7 +1267,9 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         state: dict[str, Any] = {}
         try:
             summary = self._resolve_maybe_awaitable(
-                session.get_browser_state_summary(include_screenshot=False, cached=False)
+                session.get_browser_state_summary(
+                    include_screenshot=False, cached=False
+                )
             )
             state["url"] = str(getattr(summary, "url", "") or "")
             state["title"] = str(getattr(summary, "title", "") or "")
@@ -1152,18 +1288,25 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
 
         if not state.get("url"):
             try:
-                state["url"] = str(self._resolve_maybe_awaitable(session.get_current_page_url()) or "")
+                state["url"] = str(
+                    self._resolve_maybe_awaitable(session.get_current_page_url()) or ""
+                )
             except Exception:
                 pass
         if not state.get("title"):
             try:
-                state["title"] = str(self._resolve_maybe_awaitable(session.get_current_page_title()) or "")
+                state["title"] = str(
+                    self._resolve_maybe_awaitable(session.get_current_page_title())
+                    or ""
+                )
             except Exception:
                 pass
 
         return state
 
-    def _dependency_failure_result(self, plan: list[dict], memory: dict, reason: str) -> dict:
+    def _dependency_failure_result(
+        self, plan: list[dict], memory: dict, reason: str
+    ) -> dict:
         results = []
         for step in plan:
             item = self._make_failed_result(step, reason)
@@ -1172,28 +1315,39 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         memory["browser_use_errors"] = [reason]
         return {"results": results, "memory": memory, "screenshots": []}
 
-    def _agent_failure_result(self, plan: list[dict], memory: dict,
-                              reason: str, task: str,
-                              evidence_files: list[str] | None = None) -> dict:
+    def _agent_failure_result(
+        self,
+        plan: list[dict],
+        memory: dict,
+        reason: str,
+        task: str,
+        evidence_files: list[str] | None = None,
+    ) -> dict:
         screenshots = self._merge_evidence_paths(evidence_files)
         results = []
         for step in plan:
-            item = self._make_failed_result(step, f"Browser-use Agent 执行失败: {reason}")
+            item = self._make_failed_result(
+                step, f"Browser-use Agent 执行失败: {reason}"
+            )
             if screenshots:
                 item["screenshot_path"] = screenshots[-1]
             results.append(item)
             self._record_action(memory, item)
-        memory.setdefault("agent_history", []).append({
-            "agent": "browser-use",
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "task": task,
-            "summary": "",
-            "errors": [reason],
-            "urls": [],
-            "screenshots": screenshots,
-        })
+        memory.setdefault("agent_history", []).append(
+            {
+                "agent": "browser-use",
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "task": task,
+                "summary": "",
+                "errors": [reason],
+                "urls": [],
+                "screenshots": screenshots,
+            }
+        )
         memory["browser_use_errors"] = [reason]
-        memory["screenshots"] = list(dict.fromkeys(memory.get("screenshots", []) + screenshots))
+        memory["screenshots"] = list(
+            dict.fromkeys(memory.get("screenshots", []) + screenshots)
+        )
         return {"results": results, "memory": memory, "screenshots": screenshots}
 
     def _summarize_history(self, history: Any) -> str:
@@ -1261,7 +1415,9 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
                     status_label=status_label,
                 )
             except Exception as exc:
-                logger.warning("复制 Browser-use 步骤截图失败: path=%s error=%s", source_path, exc)
+                logger.warning(
+                    "复制 Browser-use 步骤截图失败: path=%s error=%s", source_path, exc
+                )
                 continue
             if copied_path:
                 copied.append(copied_path)
@@ -1277,6 +1433,7 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         patterns = [
             "/tmp/browser_use_agent_*/browseruse_agent_data/*",
             "/tmp/browser_use_agent_*/agent_data/*",
+            "/tmp/browser_use_agent_*/screenshots/*",
         ]
         copied: list[str] = []
         status_label = self._evidence_status_label(success)
@@ -1285,7 +1442,11 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
                 if not os.path.isfile(source_path):
                     continue
                 if os.path.splitext(source_path)[1].lower() not in {
-                    ".pdf", ".png", ".jpg", ".jpeg", ".webp"
+                    ".pdf",
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".webp",
                 }:
                     continue
                 try:
@@ -1312,7 +1473,9 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         status_label: str = "",
     ) -> str:
         os.makedirs(self.output_dir, exist_ok=True)
-        stem, ext = self._evidence_output_name_parts(source_path, scenario_id, status_label)
+        stem, ext = self._evidence_output_name_parts(
+            source_path, scenario_id, status_label
+        )
         destination = self._next_available_output_path(stem, ext)
 
         if os.path.abspath(source_path) == os.path.abspath(destination):
@@ -1339,7 +1502,8 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         original_stem, ext = os.path.splitext(basename)
         original_token = self._sanitize_evidence_token(original_stem) or "evidence"
         parts = [
-            token for token in [
+            token
+            for token in [
                 self._sanitize_evidence_token(scenario_id),
                 self._sanitize_evidence_token(status_label),
                 original_token,
@@ -1437,3 +1601,129 @@ Browser-use 当前没有 screenshot action；遇到截图、保存证据、页�
         except Exception:
             text = str(value)
         return text[:max_len]
+
+    def _start_real_time_evidence_monitor(
+        self,
+        scenario_id: str = "",
+        start_time: float | None = None,
+    ) -> dict[str, Any]:
+        """启动后台线程，实时监听并保存浏览器证据文件。
+
+        这解决了 browser_use 生成的证据文件（PDF、PNG等）在执行完成后才被批量
+        复制的问题。通过实时监听，可以实现"边执行边保存"的效果。
+
+        Args:
+            scenario_id: 测试场景 ID
+            start_time: 监听开始的时间戳
+
+        Returns:
+            包含线程对象和监听参数的字典
+        """
+        if start_time is None:
+            start_time = datetime.now().timestamp()
+
+        # 共享状态：线程会修改这个字典
+        monitor_state: dict[str, Any] = {
+            "running": True,
+            "files": [],
+            "copied_paths": set(),
+            "last_scan_time": start_time,
+        }
+
+        def monitor_worker() -> None:
+            """后台监听工作函数。"""
+            patterns = [
+                "/tmp/browser_use_agent_*/browseruse_agent_data/*",
+                "/tmp/browser_use_agent_*/agent_data/*",
+                "/tmp/browser_use_agent_*/screenshots/*",
+            ]
+            scan_interval = 0.5  # 每 0.5 秒扫描一次
+
+            while monitor_state.get("running", False):
+                try:
+                    for pattern in patterns:
+                        for source_path in glob.glob(pattern):
+                            if not os.path.isfile(source_path):
+                                continue
+
+                            # 只处理证据文件
+                            ext = os.path.splitext(source_path)[1].lower()
+                            if ext not in {".pdf", ".png", ".jpg", ".jpeg", ".webp"}:
+                                continue
+
+                            # 跳过已复制的文件
+                            abs_path = os.path.abspath(source_path)
+                            if abs_path in monitor_state.get("copied_paths", set()):
+                                continue
+
+                            # 只处理在监听开始后生成的文件
+                            try:
+                                if os.path.getmtime(source_path) < start_time - 5:
+                                    continue
+                            except Exception:
+                                continue
+
+                            # 复制文件到 output_dir
+                            try:
+                                copied_path = self._copy_evidence_file_to_output(
+                                    source_path,
+                                    scenario_id=scenario_id,
+                                    status_label="",  # 执行中，不区分成功/失败
+                                )
+
+                                if copied_path:
+                                    monitor_state.setdefault("copied_paths", set()).add(
+                                        abs_path
+                                    )
+                                    monitor_state.setdefault("files", []).append(
+                                        copied_path
+                                    )
+                                    print(
+                                        f"[RealTimeMonitor] 实时保存证据文件: {os.path.basename(copied_path)}"
+                                    )
+                            except Exception as e:
+                                logger.debug(
+                                    f"[RealTimeMonitor] 复制文件失败: {source_path} - {e}"
+                                )
+                                continue
+
+                    # 短暂休眠以避免 CPU 消耗过高
+                    time.sleep(scan_interval)
+
+                except Exception as e:
+                    logger.debug(f"[RealTimeMonitor] 监听过程出错: {e}")
+                    time.sleep(1.0)
+
+        # 启动后台线程（守护线程，不阻止程序退出）
+        thread = threading.Thread(target=monitor_worker, daemon=True)
+        thread.start()
+
+        monitor_state["thread"] = thread
+        return monitor_state
+
+    def _stop_real_time_evidence_monitor(
+        self,
+        monitor_state: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """停止实时监听线程并返回收集到的文件列表。
+
+        Args:
+            monitor_state: 由 _start_real_time_evidence_monitor 返回的监听状态字典
+
+        Returns:
+            实时监听过程中收集到的文件路径列表
+        """
+        if monitor_state is None:
+            return []
+
+        # 停止监听线程
+        monitor_state["running"] = False
+
+        # 等待线程完成（最多等待 5 秒）
+        thread = monitor_state.get("thread")
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+
+        # 返回已复制的文件列表
+        files = monitor_state.get("files", [])
+        return [f for f in files if f]  # 过滤空值
