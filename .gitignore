@@ -10,6 +10,9 @@ venv/
 # Output (generated at runtime)
 output/
 
+# Local design notes
+execution_agent.md
+
 # ChromaDB vector store
 chroma_db/
 

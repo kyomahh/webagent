@@ -1,5 +1,12 @@
 """Plan-Execute-Verify Agent 提示词 —— planner 和 replanner 的提示词模板。"""
 
+from core.fixed_account import (
+    TEST_ACCOUNT_EMAIL,
+    TEST_ACCOUNT_PASSWORD,
+    TEST_ACCOUNT_USERNAME,
+    fixed_account_label,
+)
+
 
 # ── 可用动作清单 ──
 
@@ -108,10 +115,10 @@ def build_planner_prompt(
 - 注册流程通常是：打开登录页 → 点击"注册"或"Sign up"按钮 → 跳转到注册页面 → 填写用户名/邮箱/密码 → 点击注册按钮
 - 必须优先执行「注册」相关的测试用例（scenario_name 中包含"注册"或"register"的用例）
 - 如果测试用例列表中没有注册用例，planner 应选择第一个登录用例执行，但在执行时 plan_and_execute 会自动处理（先访问登录页，寻找注册链接）
-- 注册时使用固定测试账号：用户名 "testuser001"，邮箱 "testuser001@test.com"，密码 "Test@123456"
-- 注册成功后，后续所有登录用例都使用 testuser001 / Test@123456
+- 注册时使用固定测试账号：{fixed_account_label()}
+- 注册成功后，后续所有登录用例都使用邮箱 "{TEST_ACCOUNT_EMAIL}" 和密码 "{TEST_ACCOUNT_PASSWORD}"；用户名 "{TEST_ACCOUNT_USERNAME}" 只用于注册页的用户名字段，不能当作密码拼接
 - 执行顺序必须为：注册 → 登录 → 其他功能测试
-- 如果所有测试都因"用户名或密码无效"而失败，说明注册未完成，需要先注册再继续"""
+- 如果所有登录相关测试都因认证失败而失败，说明注册或登录前置条件未完成，需要先收敛前置流程再继续"""
 
 
 def build_replanner_prompt(max_retries: int = 2) -> str:

@@ -22,6 +22,7 @@ class BrowserSession:
 
     def __init__(self):
         self.page: Page | None = None
+        self.browser_use_state: dict | None = None
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -84,6 +85,7 @@ class BrowserSession:
             except Exception:
                 pass
         self.page = None
+        self.browser_use_state = None
         self._context = None
         self._browser = None
         self._playwright = None

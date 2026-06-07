@@ -23,6 +23,7 @@ from urllib.parse import urljoin
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
+from core.fixed_account import TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD, TEST_ACCOUNT_USERNAME
 from tools.execution_tool import ExecutionToolInterface
 from tools.impl.page_state import detect_page_state, desired_page_for_step
 
@@ -213,9 +214,9 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
    - wait: 等待，target_element 为空，value 填等待秒数
    - screenshot: 截图，target_element 可填 当前页面，value 为空
 4. 对于 type 操作，如果测试步骤没有给出输入值，请根据字段语义生成合理测试数据：
-   - 邮箱/email: webagent_test@example.com
-   - 密码/password: Test@123456
-   - 用户名/姓名/name/user: webagent_user
+   - 邮箱/email: {TEST_ACCOUNT_EMAIL}
+   - 密码/password: {TEST_ACCOUNT_PASSWORD}
+   - 用户名/姓名/name/user: {TEST_ACCOUNT_USERNAME}
    - 标题/title: 自动化测试标题
    - 描述/content/description: 这是自动化测试内容
 5. target_element 应尽量填写页面上最可能出现的短文本，例如"登录""注册""Create an account""保存""用户名""邮箱"，不要写很长的句子。
@@ -1687,7 +1688,7 @@ HTML 源码（截取）:
         text = str(text or "")
 
         # 特殊处理英文格式："Enter 'value' in the 'field_name' input field"
-        # 例如："Enter 'testuser001@test.com' in the 'Email' input field"
+        # 例如："Enter '<fixed test email>' in the 'Email' input field"
         in_the_pattern = r"(?:in|into)\s+the\s+['\"]?(.*?)['\"]?\s+(?:input|text|field)"
         in_the_match = re.search(in_the_pattern, text, re.IGNORECASE)
         if in_the_match:
@@ -1728,11 +1729,11 @@ HTML 源码（截取）:
         target = str(target or "")
         target_lower = target.lower()
         if any(k in target for k in ["邮箱", "邮件"]) or any(k in target_lower for k in ["email", "mail"]):
-            return "webagent_test@example.com"
+            return TEST_ACCOUNT_EMAIL
         if "密码" in target or any(k in target_lower for k in ["password", "pwd"]):
-            return "Test@123456"
+            return TEST_ACCOUNT_PASSWORD
         if any(k in target for k in ["用户名", "姓名", "名称", "用户"]) or any(k in target_lower for k in ["name", "user"]):
-            return "webagent_user"
+            return TEST_ACCOUNT_USERNAME
         if any(k in target for k in ["标题", "主题"]) or "title" in target_lower:
             return "自动化测试标题"
         if any(k in target for k in ["描述", "内容", "备注"]) or any(k in target_lower for k in ["description", "content"]):

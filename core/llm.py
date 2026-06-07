@@ -43,6 +43,24 @@ _MODEL_CONFIGS = {
         "default_params": {"temperature": 0.1, "max_tokens": 4096},
     },
     # 智谱视觉模型
+    "GLM4.6V": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "model_id": "glm-4.6v",
+        "default_params": {"temperature": 0.1, "max_tokens": 4096},
+    },
+    "glm-4.6v": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "model_id": "glm-4.6v",
+        "default_params": {"temperature": 0.1, "max_tokens": 4096},
+    },
+    "GLM-4.6V": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "model_id": "glm-4.6v",
+        "default_params": {"temperature": 0.1, "max_tokens": 4096},
+    },
     "glm-4.6v-flash": {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "api_key_env": "ZHIPUAI_API_KEY",
@@ -54,6 +72,17 @@ _MODEL_CONFIGS = {
         "default_params": {"temperature": 0.1, "max_tokens": 4096},
     },
 }
+
+def _normalize_proxy_env() -> None:
+    """兼容 httpx 对 SOCKS 代理 URL scheme 的要求。"""
+    for key in [
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    ]:
+        value = os.environ.get(key)
+        if value and value.lower().startswith("socks://"):
+            os.environ[key] = "socks5://" + value[len("socks://"):]
+
 
 def get_llm(
     model_name: str = "glm-4.7",
@@ -102,10 +131,12 @@ def get_llm(
     if temperature is not None:
         final_params["temperature"] = temperature
     final_params.update(kwargs)
+
+    _normalize_proxy_env()
     
     # 创建并返回ChatOpenAI实例
     return ChatOpenAI(
-        model=model_name,
+        model=config.get("model_id", model_name),
         base_url=config["base_url"],
         api_key=api_key,
         **final_params

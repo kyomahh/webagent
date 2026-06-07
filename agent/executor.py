@@ -283,6 +283,53 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
         steps.insert(insert_at, step_text)
         test_case["steps"] = steps
 
+    def _mentions_terms_or_policy(text: str) -> bool:
+        return re.search(r"(服务条款|隐私|terms|privacy|policy|复选框|checkbox)", text, re.I) is not None
+
+    def _has_negative_interaction_intent(text: str) -> bool:
+        """识别通用的“不要执行某交互”意图，避免把反向用例改成正向流程。"""
+        text = str(text or "")
+        lower = text.lower()
+        english_negative = re.search(
+            r"\b("
+            r"do\s+not|don't|dont|not\s+to|not\s+(?:check|click|select|accept|agree|choose|enable)|"
+            r"without|skip|leave\s+\w*\s*(?:unchecked|unselected|unaccepted)|unchecked|unselected"
+            r")\b",
+            lower,
+        )
+        chinese_negative = re.search(
+            r"(不要|不应|不能|不得|禁止|无需|无须|跳过|保持未|未勾选|不勾选|未选中|不选中|未接受|不接受|不同意)",
+            text,
+            re.I,
+        )
+        return english_negative is not None or chinese_negative is not None
+
+    def _test_case_negative_terms_intent(test_case: dict) -> bool:
+        parts = [
+            str(test_case.get("scenario_name", "")),
+            " ".join(str(step) for step in test_case.get("steps", [])),
+            " ".join(str(exp) for exp in test_case.get("expectations", [])),
+        ]
+        text = "\n".join(parts)
+        return _mentions_terms_or_policy(text) and _has_negative_interaction_intent(text)
+
+    def _has_terms_or_policy_step(test_case: dict) -> bool:
+        return any(
+            _mentions_terms_or_policy(str(step))
+            for step in test_case.get("steps", [])
+        )
+
+    def _has_positive_terms_acceptance_step(test_case: dict) -> bool:
+        for step in test_case.get("steps", []):
+            step_text = str(step)
+            if not _mentions_terms_or_policy(step_text):
+                continue
+            if _has_negative_interaction_intent(step_text):
+                continue
+            if re.search(r"(勾选|选中|接受|同意|accept|agree|check|tick|select)", step_text, re.I):
+                return True
+        return False
+
     def _is_registration_case(test_case: dict) -> bool:
         """判断测试用例是否为注册类用例。
 
@@ -336,7 +383,11 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
             steps.insert(0, "点击登录页面上的 \"Create an account\" 按钮")
         if not steps or not re.search(r"^(打开|访问|进入).*?(目标网站|登录|首页)", steps[0], re.I):
             steps.insert(0, "打开目标网站登录页面")
-        if not re.search(r"(勾选|接受|accept).*(服务条款|隐私|terms|privacy|复选框|checkbox)", "\n".join(steps), re.I):
+        adapted["steps"] = steps
+        if (
+            not _has_terms_or_policy_step(adapted)
+            and not _test_case_negative_terms_intent(adapted)
+        ):
             insert_at = len(steps)
             for idx, step in enumerate(steps):
                 if re.search(r"(点击|click).*(注册|register)", str(step), re.I):
@@ -360,17 +411,22 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
             "details": verification.get("details", {}),
         })
 
-        # 典型注册失败：页面提示未接受 Terms/Privacy。下一次必须先勾选复选框再提交。
+        # 注册失败提示 Terms/Privacy 时，重试策略必须先看原用例是正向还是负向。
         if re.search(r"(服务条款|隐私|terms|privacy|未接受|accept)", failure_text, re.I):
-            if not _has_step_matching(adapted, r"(勾选|接受|accept).*(服务条款|隐私|terms|privacy|复选框|checkbox)"):
+            if _test_case_negative_terms_intent(adapted):
+                adapted["retry_hint"] = (
+                    "该用例包含未接受 Terms/Privacy 的负向测试意图；"
+                    "重试时必须保持复选框未勾选，并继续提交以验证阻断行为。"
+                )
+            elif not _has_positive_terms_acceptance_step(adapted):
                 _insert_before_register(
                     adapted,
                     "勾选 Accept Terms of Service and Privacy Policy 复选框",
                 )
-            adapted["retry_hint"] = (
-                "上次注册失败原因是未接受 Terms of Service / Privacy Policy；"
-                "本次执行必须先勾选对应复选框，再点击 Register。"
-            )
+                adapted["retry_hint"] = (
+                    "上次注册失败原因是未接受 Terms of Service / Privacy Policy；"
+                    "本次执行必须先勾选对应复选框，再点击 Register。"
+                )
 
         return adapted
 
@@ -435,6 +491,7 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                         "target_url": config.target_url,
                         "output_dir": config.output_dir,
                         "headless": config.headless,
+                        "scenario_id": sid,
                     }
                     # 标记当前用例是否需要清除登录态（注册/登录用例需要干净状态）
                     needs_clean = _needs_clean_state(sid, tc)
@@ -490,6 +547,7 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                     summary = f"未找到测试用例 {sid}"
                 else:
                     results = state.get("execution_results", {}).get(sid, [])
+                    print(f"[Executor] 开始验证 {sid}: {len(results)} 条执行结果")
                     v = verify_impl.verify(tc, results, state.get("execution_memory", {}))
                     with state_update_lock:
                         existing_v = dict(state.get("verification_results", {}))

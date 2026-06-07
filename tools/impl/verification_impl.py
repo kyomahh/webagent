@@ -85,7 +85,7 @@ class MyVerificationTool(VerificationToolInterface):
         expectations = test_case.get("expectations", [])
 
         # ── 直接使用 LLM 验证 ──
-        llm_result = self._llm_verify(test_case, execution_results, expectations)
+        llm_result = self._llm_verify(test_case, execution_results, expectations, execution_memory)
         if llm_result is not None:
             return llm_result
 
@@ -103,11 +103,13 @@ class MyVerificationTool(VerificationToolInterface):
                 "total": total,
                 "failed_steps": failed_steps,
                 "expectation_check": "LLM 不可用，未进行语义验证",
+                "failure_type": "none" if basic_passed else "other",
+                "auth_failure_permanent": False,
             },
         }
 
     def _llm_verify(self, test_case: dict, execution_results: list[dict],
-                    expectations: list[str]) -> dict | None:
+                    expectations: list[str], execution_memory: dict | None = None) -> dict | None:
         """使用 LLM 进行语义分析验证，对比预期结果与实际执行轨迹。
 
         核心改进：
@@ -150,17 +152,7 @@ class MyVerificationTool(VerificationToolInterface):
 
             exec_details.append(detail)
 
-        # 获取当前页面状态
-        page = self._get_page()
-        page_info = {}
-        if page:
-            try:
-                page_info["url"] = page.url
-                page_info["title"] = page.title()
-                page_text = page.locator("body").inner_text(timeout=3000)[:1500]
-                page_info["text_snippet"] = page_text
-            except Exception:
-                page_info["error"] = "无法获取页面信息"
+        page_info = self._get_page_info(execution_memory or {})
 
         prompt = f"""你是一个软件测试验证专家。请通过语义分析判断测试是否通过。
 
@@ -188,27 +180,32 @@ class MyVerificationTool(VerificationToolInterface):
    - 如果 exception 是"元素未找到"，说明页面状态不符合预期
    - 如果 exception 是"超时"，说明页面响应慢或卡住
    - 如果 exception 是"验证失败"，说明操作未达到预期效果
-3. **预期结果匹配**：
-   - 通过语义分析判断当前页面是否体现预期结果
-   - 例如：预期"登录成功"，当前页面 URL 包含 "dashboard" → 通过
-   - 例如：预期"显示错误消息"，页面包含 error 关键词 → 通过
-4. **不同表述的理解**：
-   - "sign in" = "login" = "登录"
-   - "register" = "sign up" = "注册"
-   - "dashboard" = "home" = "首页" = "工作台"
+	3. **预期结果匹配**：
+	   - 通过语义分析判断当前页面是否体现预期结果
+	   - 例如：预期登录成功，当前页面状态体现已进入登录后区域 → 通过
+	   - 例如：预期显示错误消息，页面出现与失败原因一致的提示 → 通过
+	4. **不同表述的理解**：
+	   - 对中英文、多语言和同义表达按业务含义理解，不要逐字匹配固定词表
 
-**输出格式**（严格 JSON，不要 markdown）：
-{{
-    "passed": true或false,
-    "reason": "基于语义分析的判断原因（50-100字）",
-    "details": {{
-        "success_count": {success_count},
-        "total": {total},
-        "failed_steps": [失败步骤ID列表],
-        "exception_analysis": "对关键exception的分析",
-        "expectation_match": "预期结果与实际结果的语义匹配说明"
-    }}
-}}"""
+	**输出格式**（严格 JSON，不要 markdown）：
+	{{
+	    "passed": true或false,
+	    "reason": "基于语义分析的判断原因（50-100字）",
+	    "details": {{
+	        "success_count": {success_count},
+	        "total": {total},
+	        "failed_steps": [失败步骤ID列表],
+	        "exception_analysis": "对关键exception的分析",
+	        "expectation_match": "预期结果与实际结果的语义匹配说明",
+	        "failure_type": "none|auth_failure|page_state|element_missing|timeout|data_conflict|other",
+	        "auth_failure_permanent": true或false
+	    }}
+	}}
+
+	字段说明：
+	- failure_type 必须通过执行轨迹和页面状态做语义判断，不要依赖固定错误文案；通过时填 none。
+	- 只有当失败原因是登录/认证流程阻止进入目标功能时，failure_type 才填 auth_failure。
+	- auth_failure_permanent 只在当前证据能说明所给账号或凭据本身不可用于认证时填 true；加载中、网络慢或证据不足时填 false。"""
 
         try:
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -228,10 +225,16 @@ class MyVerificationTool(VerificationToolInterface):
                     text = m.group(0)
 
             raw = json.loads(text.strip())
+            passed = bool(raw.get("passed", False))
+            details = raw.get("details", {})
+            if not isinstance(details, dict):
+                details = {}
+            details.setdefault("failure_type", "none" if passed else "other")
+            details.setdefault("auth_failure_permanent", False)
             return {
-                "passed": bool(raw.get("passed", False)),
+                "passed": passed,
                 "reason": str(raw.get("reason", "")),
-                "details": raw.get("details", {}),
+                "details": details,
             }
         except Exception as e:
             print(f"[VerificationTool] LLM 验证失败: {e}")
@@ -241,7 +244,8 @@ class MyVerificationTool(VerificationToolInterface):
         """获取 LLM 实例，使用项目统一的 core.llm.get_llm() 接口。"""
         try:
             from core.llm import get_llm
-            return get_llm(self.config.model_name)
+            timeout = float(os.environ.get("VERIFICATION_LLM_TIMEOUT_SECONDS", "60"))
+            return get_llm(self.config.model_name, timeout=timeout, max_retries=1)
         except Exception:
             return None
 
@@ -252,6 +256,42 @@ class MyVerificationTool(VerificationToolInterface):
             if page is not None and not page.is_closed():
                 return page
         return None
+
+    def _get_page_info(self, execution_memory: dict) -> dict:
+        """获取验证用页面证据，优先实时 page，其次 Browser-use 写入的状态。"""
+        page = self._get_page()
+        if page:
+            try:
+                return {
+                    "url": page.url,
+                    "title": page.title(),
+                    "text_snippet": page.locator("body").inner_text(timeout=3000)[:1500],
+                    "source": "playwright_page",
+                }
+            except Exception as exc:
+                return {"error": f"无法获取 Playwright 页面信息: {exc}"}
+
+        if self.session is not None:
+            browser_use_state = getattr(self.session, "browser_use_state", None)
+            if isinstance(browser_use_state, dict) and browser_use_state:
+                return dict(browser_use_state)
+
+        browser_use_page = execution_memory.get("browser_use_page")
+        if isinstance(browser_use_page, dict) and browser_use_page:
+            return dict(browser_use_page)
+
+        page_states = execution_memory.get("page_states", [])
+        if isinstance(page_states, list) and page_states:
+            latest = page_states[-1]
+            if isinstance(latest, dict):
+                return {
+                    "url": latest.get("url", ""),
+                    "title": latest.get("title", ""),
+                    "text_snippet": latest.get("text", ""),
+                    "source": "execution_memory.page_states",
+                }
+
+        return {}
 
     def _check_page_state(self, expectations: list[str]) -> str | None:
         """通过共享 page 检查当前页面状态是否匹配预期。"""

@@ -14,6 +14,12 @@ from langchain_community.embeddings import ZhipuAIEmbeddings
 from langchain_community.vectorstores import Chroma
 
 from core.config import AgentConfig, default_config
+from core.fixed_account import (
+    TEST_ACCOUNT_EMAIL,
+    TEST_ACCOUNT_PASSWORD,
+    TEST_ACCOUNT_USERNAME,
+)
+from scripts.randomize_test_case_credentials import randomize_test_cases, write_credentials_file
 from tools.rag_tool import RagToolInterface
 
 
@@ -365,10 +371,10 @@ class MyRagTool(RagToolInterface):
    - "expectations": 预期结果列表（字符串数组）
 4. 只输出JSON数组，不要有任何说明文字或markdown代码块
 5. 测试数据必须统一使用以下账号（注册和登录必须一致）：
-   - 邮箱/登录名: "testuser001@test.com"
-   - 用户名: "testuser001"
-   - 密码: "Test@123456"
-6. 重要：登录时输入的是邮箱（testuser001@test.com），不是用户名！登录表单通常用 Email 字段
+   - 邮箱/登录名: "{TEST_ACCOUNT_EMAIL}"
+   - 用户名: "{TEST_ACCOUNT_USERNAME}"
+   - 密码: "{TEST_ACCOUNT_PASSWORD}"
+6. 重要：登录时输入的是邮箱（{TEST_ACCOUNT_EMAIL}），不是用户名！登录表单通常用 Email 字段。不要生成其他测试账号。
 7. 步骤中的按钮和输入框描述应使用实际页面上出现的文本（英文页面用英文，如"Email"、"Password"、"Login"、"Register"）
 
 输出（仅JSON数组）："""
@@ -421,12 +427,19 @@ class MyRagTool(RagToolInterface):
 
         # 确保注册用例存在且在第一位
         test_cases = self._ensure_registration_case(test_cases)
+        test_cases, credentials = randomize_test_cases(test_cases)
 
         # 保存测试用例到 JSON 文件，便于查看和调试
         try:
             output_dir = getattr(self.config, "output_dir", "output") or "output"
             os.makedirs(output_dir, exist_ok=True)
             save_path = os.path.join(output_dir, "test_cases_manual1.json")
+            credentials_path = write_credentials_file(credentials, output_dir, save_path)
+            print(
+                "[RagTool] 已随机化测试账号: "
+                f"email={credentials.email}, username={credentials.username}"
+            )
+            print(f"[RagTool] 随机账号已保存到: {credentials_path}")
             import json
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(test_cases, f, ensure_ascii=False, indent=2)
@@ -514,10 +527,10 @@ class MyRagTool(RagToolInterface):
             "steps": [
                 "打开目标网站登录页面",
                 "点击登录页面上的 \"Create an account\" 按钮",
-                "在用户名输入框中输入 \"testuser001\"",
-                "在邮箱输入框中输入 \"testuser001@test.com\"",
-                "在密码输入框中输入 \"Test@123456\"",
-                "如果存在确认密码输入框，输入 \"Test@123456\"",
+                f"在用户名输入框中输入 \"{TEST_ACCOUNT_USERNAME}\"",
+                f"在邮箱输入框中输入 \"{TEST_ACCOUNT_EMAIL}\"",
+                f"在密码输入框中输入 \"{TEST_ACCOUNT_PASSWORD}\"",
+                f"如果存在确认密码输入框，输入 \"{TEST_ACCOUNT_PASSWORD}\"",
                 "如果存在服务条款或隐私协议复选框，勾选同意",
                 "点击注册按钮",
                 "验证注册成功（页面跳转到登录页或首页）",

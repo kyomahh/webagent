@@ -42,7 +42,7 @@ from core.config import AgentConfig
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 组员 B 注册：执行与交互模块（Playwright）
+# 组员 B 注册：执行与交互模块（Browser-use）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 你要做的事：
 #   1. 创建 tools/impl/execution_impl.py
@@ -76,11 +76,10 @@ from core.browser import BrowserSession
 
 
 def get_execution_tool(config: Any, session: BrowserSession):
-    # 修改点：注册真实执行与交互模块，让 main.py 能加载 PlaywrightExecutionTool。
-    # session: 共享浏览器会话，用于在执行和验证模块间传递同一个 page。
-    from tools.impl.execution_impl import PlaywrightExecutionTool
+    # Browser-use 版本：直接用 Browser-use Agent 执行测试场景，不走旧 Playwright executor。
+    from tools.impl.execution_browser_use_impl import BrowserUseExecutionTool
 
-    return PlaywrightExecutionTool(config, session)
+    return BrowserUseExecutionTool(config, session)
 
 
 def get_rag_tool(config: Any):

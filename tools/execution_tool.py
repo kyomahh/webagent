@@ -104,6 +104,7 @@ def make_execution_tools(exec_impl: ExecutionToolInterface, target_url: str,
             "target_url": target_url,
             "output_dir": output_dir,
             "headless": headless,
+            "scenario_id": scenario_id,
         }
 
         result = exec_impl.execute(plan, target_url, exec_memory)

@@ -23,6 +23,25 @@ def _case_text(test_case: dict) -> str:
     ])
 
 
+def _verification_text(verification: dict | None) -> str:
+    """把验证结果压平为可检索文本。"""
+    if not isinstance(verification, dict):
+        return ""
+
+    parts = [
+        str(verification.get("reason", "")),
+        str(verification.get("message", "")),
+        str(verification.get("error", "")),
+    ]
+    details = verification.get("details", {})
+    if isinstance(details, dict):
+        for value in details.values():
+            parts.append(str(value))
+    elif details:
+        parts.append(str(details))
+    return " ".join(part for part in parts if part)
+
+
 def _is_registration_case(test_case: dict) -> bool:
     text = _case_text(test_case).lower()
     return any(
@@ -60,11 +79,55 @@ def _find_registration_case(test_cases: list[dict]) -> dict | None:
     return max(candidates, key=_registration_case_score)
 
 
+def _has_inline_login_step(test_case: dict) -> bool:
+    """识别业务用例开头自带登录步骤的场景。"""
+    if _is_external_auth_case(test_case):
+        return False
+    steps_text = " ".join(str(step) for step in test_case.get("steps", [])).lower()
+    if not re.search(r"登录|login|log in|sign in|signin", steps_text, re.I):
+        return False
+    return re.search(r"password|密码|test@\d|@[^@\s]+", steps_text, re.I) is not None
+
+
 def _is_login_case(test_case: dict) -> bool:
-    text = _case_text(test_case).lower()
     if _is_registration_case(test_case):
         return False
-    return any(keyword in text for keyword in ["登录", "login", "log in"])
+    if _is_external_auth_case(test_case):
+        return False
+
+    scenario_text = " ".join([
+        str(test_case.get("scenario_id", "")),
+        str(test_case.get("feature_id", "")),
+        str(test_case.get("scenario_name", "")),
+    ]).lower()
+    steps = [str(step).lower() for step in test_case.get("steps", [])]
+    steps_text = " ".join(steps)
+
+    login_markers = ["登录", "login", "log in", "sign in", "signin"]
+    business_markers = [
+        "board", "project", "trello", "import", "card", "list", "label",
+        "template", "settings", "notification", "看板", "项目", "导入",
+        "卡片", "列表", "标签", "设置", "通知",
+    ]
+
+    # 登录前置用例必须是纯登录场景；不能把“先登录再做业务”的用例误判为登录用例。
+    if any(marker in scenario_text for marker in login_markers):
+        return not any(marker in scenario_text for marker in business_markers)
+
+    if not any(marker in steps_text for marker in login_markers):
+        return False
+
+    auth_step_patterns = [
+        r"email|邮箱|mail",
+        r"password|密码|pwd",
+        r"login|log in|sign in|signin|登录",
+        r"open|navigate|visit|打开|访问|进入",
+        r"screenshot|verify|check|验证|检查|确认",
+    ]
+    return (
+        len(steps) <= 5
+        and all(any(re.search(pattern, step, re.I) for pattern in auth_step_patterns) for step in steps)
+    )
 
 
 def _login_case_score(test_case: dict) -> int:
@@ -84,15 +147,37 @@ def _find_login_case(test_cases: list[dict]) -> dict | None:
     return max(candidates, key=_login_case_score)
 
 
+def _is_external_auth_case(test_case: dict) -> bool:
+    text = _case_text(test_case).lower()
+    return any(
+        marker in text
+        for marker in [
+            "sso",
+            "oauth",
+            "oidc",
+            "第三方",
+            "social login",
+            "external auth",
+            "google",
+            "github",
+            "microsoft",
+        ]
+    )
+
+
 def _case_requires(test_case: dict) -> set[str]:
     explicit = test_case.get("requires", [])
     if isinstance(explicit, list) and explicit:
         return {str(item) for item in explicit}
 
+    if _is_external_auth_case(test_case):
+        return set()
     if _is_registration_case(test_case):
         return set()
     if _is_login_case(test_case):
         return {"registered_account"}
+    if _has_inline_login_step(test_case):
+        return set()
     return {"authenticated_session"}
 
 
@@ -101,9 +186,13 @@ def _case_produces(test_case: dict) -> set[str]:
     if isinstance(explicit, list) and explicit:
         return {str(item) for item in explicit}
 
+    if _is_external_auth_case(test_case):
+        return set()
     if _is_registration_case(test_case):
-        return {"registered_account"}
+        return {"registered_account", "authenticated_session"}
     if _is_login_case(test_case):
+        return {"authenticated_session"}
+    if _has_inline_login_step(test_case):
         return {"authenticated_session"}
     return set()
 
@@ -156,6 +245,71 @@ def _execution_attempt_count(past_steps: list[tuple[str, str]], scenario_id: str
         1 for action, summary in past_steps
         if action == "plan_and_execute" and scenario_id in str(summary)
     )
+
+
+def _verification_details(verification: dict | None) -> dict:
+    if not isinstance(verification, dict):
+        return {}
+    details = verification.get("details", {})
+    return details if isinstance(details, dict) else {}
+
+
+def _verification_indicates_auth_failure(verification: dict | None) -> bool:
+    details = _verification_details(verification)
+    failure_type = str(details.get("failure_type", "")).strip().lower()
+    return failure_type == "auth_failure"
+
+
+def _verification_indicates_permanent_auth_failure(verification: dict | None) -> bool:
+    details = _verification_details(verification)
+    return details.get("auth_failure_permanent") is True
+
+
+def _auth_blocker_decision(
+    test_cases: list[dict],
+    verification_results: dict,
+    past_steps: list[tuple[str, str]],
+    max_retries: int,
+) -> dict | None:
+    """认证失败会阻断后续业务用例，必须先收敛而不是继续跑列表。"""
+    cases_by_id = {tc.get("scenario_id", ""): tc for tc in test_cases}
+    for scenario_id, verification in verification_results.items():
+        if not isinstance(verification, dict) or verification.get("passed") is not False:
+            continue
+        if not _verification_indicates_auth_failure(verification):
+            continue
+
+        test_case = cases_by_id.get(scenario_id, {})
+        if _is_external_auth_case(test_case):
+            continue
+        if not (_has_inline_login_step(test_case) or _is_login_case(test_case)):
+            continue
+
+        attempts = _execution_attempt_count(past_steps, scenario_id)
+        reason_text = _verification_text(verification)[:200] or "登录/认证失败"
+        permanent_failure = _verification_indicates_permanent_auth_failure(verification)
+        if permanent_failure or attempts >= max_retries:
+            stop_reason = "凭据或账号无效，重试无法修复" if permanent_failure else (
+                f"已达到最大重试次数 ({attempts}/{max_retries})"
+            )
+            return {
+                "action": "generate_report",
+                "args": {},
+                "reason": (
+                    f"用例 {scenario_id} 登录/认证失败（{stop_reason}），"
+                    "后续业务用例依赖登录态，停止并生成报告。"
+                    f"失败原因: {reason_text}"
+                ),
+            }
+        return {
+            "action": "plan_and_execute",
+            "args": {"scenario_id": scenario_id},
+            "reason": (
+                f"用例 {scenario_id} 登录/认证失败，必须先重试该登录前置流程 "
+                f"({attempts}/{max_retries})，不能继续执行依赖登录态的后续用例。"
+                f"失败原因: {reason_text}"
+            ),
+        }
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -335,6 +489,19 @@ def make_planner_node(config):
                     }
                 }
 
+        auth_blocker = _auth_blocker_decision(
+            test_cases,
+            verification_results,
+            past_steps,
+            config.max_retries,
+        )
+        if auth_blocker:
+            print(
+                f"[Planner] 下一步: {auth_blocker['action']}({auth_blocker['args']}) - "
+                f"{auth_blocker['reason']}"
+            )
+            return {"current_task": auth_blocker}
+
         user_message = f"""## 当前数据状态
 - 文档数量: {docs_count}
 - 功能点数量: {features_count}
@@ -439,6 +606,14 @@ def _fallback_action(state: AgentState) -> str:
                 return "plan_and_execute"
             if login_id not in verification_results:
                 return "verify_results"
+    auth_blocker = _auth_blocker_decision(
+        test_cases,
+        verification_results,
+        state.get("past_steps", []),
+        int(state.get("max_retries", 2) or 2),
+    )
+    if auth_blocker:
+        return str(auth_blocker["action"])
     for tc in test_cases:
         if _blocked_by_dependencies(tc, capabilities):
             continue
@@ -508,6 +683,14 @@ def _default_args(action: str, state: AgentState) -> dict:
                     return {"scenario_id": login_id}
             if action == "verify_results" and login_id not in verification_results:
                 return {"scenario_id": login_id}
+        auth_blocker = _auth_blocker_decision(
+            test_cases,
+            verification_results,
+            state.get("past_steps", []),
+            int(state.get("max_retries", 2) or 2),
+        )
+        if auth_blocker and action == auth_blocker["action"]:
+            return dict(auth_blocker["args"])
         for tc in test_cases:
             if _blocked_by_dependencies(tc, capabilities):
                 continue

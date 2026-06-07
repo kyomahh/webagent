@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AgentConfig:
-    target_url: str = "http://localhost:3000"
+    target_url: str = "https://demo.4gaboards.com/"
     manual_url: str | None = None
     manual_dir: str | None = None
     model_name: str = "glm-4.7"
