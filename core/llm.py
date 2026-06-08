@@ -66,9 +66,15 @@ _MODEL_CONFIGS = {
         "api_key_env": "ZHIPUAI_API_KEY",
         "default_params": {"temperature": 0.1, "max_tokens": 4096},
     },
+    "glm-4.6v-flashx": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "api_key_env": "ZHIPUAI_API_KEY",
+        "default_params": {"temperature": 0.1, "max_tokens": 4096},
+    },
     "GLM-4.6V-FlashX": {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "api_key_env": "ZHIPUAI_API_KEY",
+        "model_id": "glm-4.6v-flashx",
         "default_params": {"temperature": 0.1, "max_tokens": 4096},
     },
 }

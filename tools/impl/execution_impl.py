@@ -46,7 +46,7 @@ REQUIRED_STEP_FIELDS = [
 ]
 
 # 本模块要求优先使用的智谱模型名。API 调用时模型名应使用小写 ID。
-PREFERRED_MODEL_NAME = "GLM-4.6V-FlashX"
+PREFERRED_MODEL_NAME = "glm-4.6v-flashx"
 
 # 视觉定位置信度阈值：低于此值直接跳过，走正则兜底。
 VISION_CONFIDENCE_THRESHOLD = 0.6

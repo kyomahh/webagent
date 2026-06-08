@@ -25,6 +25,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from core.fixed_account import TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD, TEST_ACCOUNT_USERNAME
+from core.test_case_dedup import remove_duplicate_successful_registration_cases
+from core.test_case_step_normalizer import normalize_test_case_steps
 from scripts.randomize_test_case_credentials import randomize_test_cases, write_credentials_file
 
 load_dotenv()
@@ -237,7 +239,13 @@ def _ensure_registration_first(test_cases: list[dict],
     Returns:
         (处理后的测试用例列表, 是否添加了备用注册用例)
     """
-    cases = list(test_cases or [])
+    cases, removed_duplicates = remove_duplicate_successful_registration_cases(list(test_cases or []))
+    if removed_duplicates:
+        removed_ids = [str(case.get("scenario_id", "")) for case in removed_duplicates]
+        print(
+            "[RegistrationCheck] 已移除重复成功注册用例: "
+            f"{', '.join(removed_ids)}"
+        )
 
     # 检查是否有LLM生成的注册用例
     llm_generated_registration = None
@@ -484,6 +492,10 @@ def main():
                     with open(cases_path, "r", encoding="utf-8") as f:
                         preloaded_cases = json.load(f)
                     preloaded_cases, inserted_registration = _ensure_registration_first(preloaded_cases)
+                    preloaded_cases = [
+                        normalize_test_case_steps(case)
+                        for case in preloaded_cases
+                    ]
                     preloaded_cases, credentials = randomize_test_cases(preloaded_cases)
                     with open(cases_path, "w", encoding="utf-8") as f:
                         json.dump(preloaded_cases, f, ensure_ascii=False, indent=2)

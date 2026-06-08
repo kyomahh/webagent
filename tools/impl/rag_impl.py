@@ -26,6 +26,8 @@ from core.fixed_account import (
     TEST_ACCOUNT_PASSWORD,
     TEST_ACCOUNT_USERNAME,
 )
+from core.test_case_dedup import remove_duplicate_successful_registration_cases
+from core.test_case_step_normalizer import normalize_step_text, normalize_test_case_steps
 from scripts.randomize_test_case_credentials import randomize_test_cases, write_credentials_file
 from tools.rag_tool import RagToolInterface
 
@@ -427,6 +429,7 @@ class MyRagTool(RagToolInterface):
 6. 重要：登录时输入的是邮箱（{TEST_ACCOUNT_EMAIL}），不是用户名！登录表单通常用 Email 字段。不要生成其他测试账号。
 7. 步骤中的按钮和输入框描述应使用实际页面上出现的文本（英文页面用英文，如"Email"、"Password"、"Login"、"Register"）
 8. 不要编造手册证据中没有出现的页面、按钮或功能；每个场景必须至少引用 1 个 citation_id，除非手册证据为空
+9. 如果需要切换到 List View，不要写 "Switch to List View" 或 "Navigate to the List View"；应写成点击看板工具栏中标记/描述为 "Board view/List view" 的视图切换控件来切换到 List view
 
 输出（仅JSON数组）："""
 
@@ -461,7 +464,7 @@ class MyRagTool(RagToolInterface):
                 if not isinstance(sc, dict):
                     continue
                 raw_steps = sc.get("steps", [])
-                steps = [str(s) for s in raw_steps if str(s).strip()]
+                steps = [normalize_step_text(s) for s in raw_steps if str(s).strip()]
                 if not steps:
                     steps = [f"执行 {fname} 操作"]
                 citations, source_confidence = self._build_test_case_citations(sc, evidence)
@@ -473,7 +476,7 @@ class MyRagTool(RagToolInterface):
                     source_confidence = "medium"
                 if not citations:
                     source_confidence = "low"
-                test_cases.append({
+                test_cases.append(normalize_test_case_steps({
                     "scenario_id": f"TS_{fid}_{idx:03d}",
                     "feature_id": fid,
                     "scenario_name": str(sc.get("scenario_name", f"测试 {fname}")),
@@ -482,7 +485,7 @@ class MyRagTool(RagToolInterface):
                     "citations": citations,
                     "source_confidence": source_confidence,
                     "unsupported_steps": unsupported_steps,
-                })
+                }))
                 idx += 1
             scenario_counter[fid] = idx
 
@@ -490,6 +493,19 @@ class MyRagTool(RagToolInterface):
         test_cases = self._annotate_structural_dependencies(test_cases)
 
         print(f"[RagTool] 共生成 {len(test_cases)} 个测试用例")
+
+        test_cases, removed_registration_duplicates = (
+            remove_duplicate_successful_registration_cases(test_cases)
+        )
+        if removed_registration_duplicates:
+            removed_ids = [
+                str(case.get("scenario_id", ""))
+                for case in removed_registration_duplicates
+            ]
+            print(
+                "[RagTool] 已移除重复成功注册用例: "
+                f"{', '.join(removed_ids)}"
+            )
 
         # 确保注册用例存在且在第一位
         test_cases = self._ensure_registration_case(test_cases)
