@@ -1,0 +1,304 @@
+"""Verification 模块测试 —— 验证与可视化模块。
+
+组员实现 VerificationToolInterface 后，修改下方 import 即可测试自己的实现。
+测试内容：
+  1. verify: 返回值格式校验（passed/reason/details）
+  2. visualize: 返回值格式校验（报告文件路径）
+  3. 验证逻辑正确性
+"""
+
+import os
+from types import SimpleNamespace
+
+import pytest
+
+# ──── 组员修改此处：替换为你的实现 ────
+from tools.impl.verification_impl import MyVerificationTool as ImplToTest
+# from tools.stub.verification_stub import StubVerificationTool as ImplToTest
+
+from conftest import (
+    assert_verification_format,
+)
+
+
+@pytest.fixture
+def verification():
+    return ImplToTest()
+
+
+# ══════════════════════════════════════════════════
+#  verify 测试
+# ══════════════════════════════════════════════════
+
+class TestVerify:
+    """测试 verify 接口。"""
+
+    def test_returns_dict(self, verification, sample_test_case, sample_execution_results):
+        """返回值必须是 dict。"""
+        result = verification.verify(sample_test_case, sample_execution_results, {})
+        assert isinstance(result, dict)
+
+    def test_result_format(self, verification, sample_test_case, sample_execution_results):
+        """验证结果必须包含 passed/reason 字段且类型正确。"""
+        result = verification.verify(sample_test_case, sample_execution_results, {})
+        assert_verification_format(result)
+
+    def test_all_passed(self, verification, sample_test_case, sample_execution_results):
+        """全部步骤成功时，验证应通过。"""
+        result = verification.verify(sample_test_case, sample_execution_results, {})
+        assert result["passed"] is True
+
+    def test_partial_failure(self, verification, sample_test_case):
+        """部分步骤失败时，验证不应通过。"""
+        results = [
+            {"step_id": 1, "action_type": "click", "action_detail": "点击",
+             "result": "成功", "success": True, "screenshot_path": ""},
+            {"step_id": 2, "action_type": "type", "action_detail": "输入",
+             "result": "失败", "success": False, "screenshot_path": ""},
+        ]
+        result = verification.verify(sample_test_case, results, {})
+        assert result["passed"] is False
+
+    def test_all_failed(self, verification, sample_test_case):
+        """全部步骤失败时，验证不应通过。"""
+        results = [
+            {"step_id": 1, "action_type": "click", "action_detail": "点击",
+             "result": "失败", "success": False, "screenshot_path": ""},
+            {"step_id": 2, "action_type": "type", "action_detail": "输入",
+             "result": "失败", "success": False, "screenshot_path": ""},
+        ]
+        result = verification.verify(sample_test_case, results, {})
+        assert result["passed"] is False
+
+    def test_empty_results(self, verification, sample_test_case):
+        """空执行结果不应报错。"""
+        result = verification.verify(sample_test_case, [], {})
+        assert_verification_format(result)
+
+    def test_has_reason(self, verification, sample_test_case, sample_execution_results):
+        """验证结果应包含原因说明。"""
+        result = verification.verify(sample_test_case, sample_execution_results, {})
+        assert len(result["reason"]) > 0
+
+    def test_llm_prompt_prioritizes_real_page_state_over_agent_summary(self, verification, monkeypatch):
+        captured = {}
+
+        class FakeLLM:
+            def invoke(self, messages):
+                captured["prompt"] = messages[-1].content
+                return SimpleNamespace(content=(
+                    '{"passed": false, "reason": "真实页面状态未体现预期业务完成", '
+                    '"details": {"success_count": 3, "total": 3, "failed_steps": [], '
+                    '"exception_analysis": "无异常", '
+                    '"expectation_match": "自我总结与真实页面状态冲突", '
+                    '"failure_type": "page_state", "auth_failure_permanent": false}}'
+                ))
+
+        monkeypatch.setattr(verification, "_get_llm", lambda: FakeLLM())
+        test_case = {
+            "scenario_id": "TS_REG",
+            "scenario_name": "Successful account creation",
+            "steps": ["Open account form", "Submit account form"],
+            "expectations": ["The account is created and the user reaches the post-registration area"],
+        }
+        results = [
+            {
+                "step_id": 1,
+                "action_type": "click",
+                "action_detail": "Open account form",
+                "result": "Agent self-report: opened the account form",
+                "success": True,
+            },
+            {
+                "step_id": 2,
+                "action_type": "click",
+                "action_detail": "Submit account form",
+                "result": "Agent self-report: account creation succeeded",
+                "success": True,
+            },
+            {
+                "step_id": 3,
+                "action_type": "screenshot",
+                "action_detail": "Save evidence",
+                "result": "Agent self-report: success evidence saved",
+                "page_text": "The visible page is still the same account input form with validation state.",
+                "success": True,
+            },
+        ]
+        memory = {
+            "browser_use_page": {
+                "text_snippet": "The visible page is still the same account input form with validation state.",
+                "source": "browser_use",
+            }
+        }
+
+        result = verification.verify(test_case, results, memory)
+
+        assert result["passed"] is False
+        assert "执行器自我报告" in captured["prompt"]
+        assert "真实页面状态优先" in captured["prompt"]
+        assert "The visible page is still the same account input form" in captured["prompt"]
+
+    def test_browser_use_page_takes_precedence_over_stale_playwright_page(self, verification):
+        class FakeLocator:
+            def inner_text(self, timeout=3000):
+                return "Email or username\nPassword\nCreate account"
+
+        class FakePage:
+            url = "https://demo.4gaboards.com/login"
+
+            def is_closed(self):
+                return False
+
+            def title(self):
+                return "Login"
+
+            def locator(self, selector):
+                return FakeLocator()
+
+        verification.session = SimpleNamespace(page=FakePage())
+        memory = {
+            "current_page": "browser_use",
+            "browser_use_page": {
+                "url": "https://demo.4gaboards.com/boards",
+                "title": "4ga Boards",
+                "text_snippet": "Getting started dashboard content",
+                "source": "browser_use",
+            },
+        }
+
+        page_info = verification._get_page_info(memory)
+
+        assert page_info["source"] == "browser_use"
+        assert page_info["url"] == "https://demo.4gaboards.com/boards"
+        assert "Getting started" in page_info["text_snippet"]
+
+
+# ══════════════════════════════════════════════════
+#  visualize 测试
+# ══════════════════════════════════════════════════
+
+class TestVisualize:
+    """测试 visualize 接口。"""
+
+    def test_returns_string(self, verification):
+        """返回值必须是 str（报告文件路径）。"""
+        state = {
+            "test_cases": [
+                {"scenario_id": "TS001", "scenario_name": "测试1",
+                 "steps": ["步骤1"], "expectations": ["预期1"]},
+            ],
+            "verification_results": {
+                "TS001": {"passed": True, "reason": "全部通过"},
+            },
+        }
+        result = verification.visualize(state)
+        assert isinstance(result, str)
+
+    def test_report_path_non_empty(self, verification):
+        """报告路径必须非空。"""
+        state = {
+            "test_cases": [],
+            "verification_results": {},
+        }
+        result = verification.visualize(state)
+        assert len(result) > 0
+
+    def test_report_file_created(self, verification):
+        """报告文件应成功创建。"""
+        state = {
+            "test_cases": [
+                {"scenario_id": "TS001", "scenario_name": "测试1",
+                 "steps": ["步骤1"], "expectations": ["预期1"]},
+            ],
+            "verification_results": {
+                "TS001": {"passed": True, "reason": "全部通过"},
+            },
+        }
+        report_path = verification.visualize(state)
+        assert os.path.isfile(report_path), f"报告文件未创建: {report_path}"
+
+    def test_empty_state(self, verification):
+        """空 state 不应报错。"""
+        state = {
+            "test_cases": [],
+            "verification_results": {},
+        }
+        result = verification.visualize(state)
+        assert isinstance(result, str)
+
+    def test_external_registration_failure_is_ignored_in_report_data(self, verification):
+        state = {
+            "test_cases": [
+                {
+                    "scenario_id": "TS_F002_001",
+                    "feature_id": "F002",
+                    "scenario_name": "New User Registration via Google SSO",
+                    "steps": [
+                        "Open the login page",
+                        "Click Sign in with Google",
+                    ],
+                    "expectations": ["The user completes third-party registration"],
+                },
+                {
+                    "scenario_id": "TS_F005_001",
+                    "feature_id": "F005",
+                    "scenario_name": "Board list view",
+                    "steps": ["Login", "Open the board list view"],
+                    "expectations": ["List view is visible"],
+                },
+            ],
+            "verification_results": {
+                "TS_F002_001": {
+                    "passed": False,
+                    "reason": "Google OAuth registration failed in test environment",
+                    "effective_status": "ignored",
+                    "ignore_reason": "外部认证依赖不可用，不计入目标应用失败",
+                },
+                "TS_F005_001": {"passed": True, "reason": "全部通过"},
+            },
+        }
+
+        report_data = verification._prepare_report_data(state)
+        google_result = report_data["verification_results"]["TS_F002_001"]
+
+        assert report_data["passed_count"] == 1
+        assert report_data["failed_count"] == 0
+        assert report_data["ignored_count"] == 1
+        assert report_data["total_count"] == 1
+        assert report_data["pass_rate"] == "1/1"
+        assert google_result["ignored"] is True
+        assert google_result["effective_status"] == "ignored"
+        assert "外部认证依赖" in google_result["ignore_reason"]
+
+    def test_failed_cases_include_scenario_name_in_report_data(self, verification):
+        state = {
+            "test_cases": [
+                {
+                    "scenario_id": "TS_F010_001",
+                    "scenario_name": "Switch board to list view",
+                    "steps": ["Open board", "Switch to List view"],
+                    "expectations": ["List view is visible"],
+                },
+            ],
+            "verification_results": {
+                "TS_F010_001": {
+                    "passed": False,
+                    "reason": "未能切换到 List view",
+                },
+            },
+        }
+
+        report_data = verification._prepare_report_data(state)
+
+        assert report_data["failed_cases"] == [
+            {
+                "scenario_id": "TS_F010_001",
+                "scenario_name": "Switch board to list view",
+                "reason": "未能切换到 List view",
+            }
+        ]
+        assert (
+            report_data["verification_results"]["TS_F010_001"]["scenario_name"]
+            == "Switch board to list view"
+        )

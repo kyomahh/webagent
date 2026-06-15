@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+venv/
+.venv/
+
+# Output (generated at runtime)
+output/
+tmpoutput/
+output.zip
+*.log
+
+# Local design notes
+execution_agent.md
+
+# ChromaDB vector store
+chroma_db/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Pytest
+.pytest_cache/
+
+# OS
+.DS_Store

@@ -1,0 +1,11 @@
+# For Administrators | 4ga Boards Docs
+
+📄️
+Administration Overview
+Here you will find explanation of all different features in the settings sections and administration panel.
+📄️
+Instance Settings
+As an administrator, you have control over instance possible login methods and users. To access it, click "Users" icon on the dashboard, or click one of the relevant options from the settings sidebar.
+📄️
+Project Settings
+If you are manager of the project that you are currently editing, click the "cog in the box" icon in the top-right corner next to + Add Board button to access this project settings.

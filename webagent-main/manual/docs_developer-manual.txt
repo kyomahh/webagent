@@ -1,0 +1,26 @@
+# For Developers | 4ga Boards Docs
+
+🗃
+Development
+2 items
+🗃
+Installation
+5 items
+📄️
+Backup and Restore
+Backup 4ga Boards instance
+📄️
+Web Server Configuration
+Nginx, Apache, Caddy, SSL
+📄️
+SSO
+Setup Google SSO
+📄️
+API
+4ga Boards API
+📄️
+Notifications
+4ga Boards Notifications
+📄️
+Additional Information
+Logging, Rotating Logs, Fail2Ban, other
