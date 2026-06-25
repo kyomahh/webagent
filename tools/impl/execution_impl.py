@@ -4,7 +4,7 @@
 不修改接口文件、不修改 agent/executor.py、不修改 tools/impl/__init__.py。
 
 核心能力：
-1. plan(): 优先调用 core.llm.get_llm()，使用 GLM-4.6V-Flash 将自然语言测试用例规划为 JSON 执行步骤；
+1. plan(): 优先调用 core.llm.get_llm()，使用 GLM-4.6V 将自然语言测试用例规划为 JSON 执行步骤；
 2. plan(): 当 LLM 不可用、API Key 未配置、模型未注册或输出 JSON 无效时，自动回退到规则解析；
 3. execute(): 使用 Playwright Chromium 执行 navigate/click/type/select/wait/screenshot；
 4. execute(): 单步失败不中断整体流程，浏览器启动失败时也返回结构化结果，避免 Agent 崩溃。
@@ -46,7 +46,7 @@ REQUIRED_STEP_FIELDS = [
 ]
 
 # 本模块要求优先使用的智谱模型名。API 调用时模型名应使用小写 ID。
-PREFERRED_MODEL_NAME = "glm-4.6v-flashx"
+PREFERRED_MODEL_NAME = "glm-4.6v"
 
 # 视觉定位置信度阈值：低于此值直接跳过，走正则兜底。
 VISION_CONFIDENCE_THRESHOLD = 0.6
@@ -84,7 +84,7 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
 
         实现策略：
         1. 构造包含 target_url、完整 test_case、动作格式约束的 Prompt；
-        2. 优先通过 core.llm.get_llm() 调用 GLM-4.6V-Flash；
+        2. 优先通过 core.llm.get_llm() 调用 GLM-4.6V；
         3. 解析 LLM 返回的 JSON 数组；
         4. 校验并修复字段、类型、step_id、action_type、首尾步骤；
         5. 若任一环节失败，则回退到 _rule_based_plan()，保证无 API Key 的测试环境也能通过。
@@ -101,7 +101,7 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
             response = None
             last_error = None
 
-            # 最多重试 3 次，避免 GLM-4.6V-Flash 临时繁忙导致直接失败
+            # 最多重试 3 次，避免 GLM-4.6V 临时繁忙导致直接失败
             for attempt in range(3):
                 try:
                     response = llm.invoke([
@@ -132,7 +132,7 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
                 print("[ExecutionTool] LLM 计划过短，疑似丢失关键步骤，回退到规则规划。")
             print("[ExecutionTool] LLM 返回结果为空或格式无效，回退到规则规划。")
         except Exception as exc:
-            # 测试环境常见原因：没有 ZHIPUAI_API_KEY、core/llm.py 未注册 glm-4.6v-flash、网络不可用等。
+            # 测试环境常见原因：没有 ZHIPUAI_API_KEY、core/llm.py 未注册 glm-4.6v、网络不可用等。
             print(f"[ExecutionTool] LLM 规划失败，已回退到规则规划: {exc}")
 
         return self._rule_based_plan(test_case)
@@ -177,7 +177,7 @@ class PlaywrightExecutionTool(ExecutionToolInterface):
         return len(executable_steps) < max(2, len(raw_steps) // 2)
 
     def _get_planning_llm(self):
-        """获取规划用 LLM，直接通过 core.llm.get_llm() 统一入口调用 GLM-4.6V-Flash。"""
+        """获取规划用 LLM，直接通过 core.llm.get_llm() 统一入口调用 GLM-4.6V。"""
         import core.llm as llm_module
         return llm_module.get_llm(PREFERRED_MODEL_NAME, temperature=0.1)
 

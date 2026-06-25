@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
+import os
 import re
 import subprocess
 import sys
@@ -11,14 +14,30 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+from core.test_case_dedup import prepare_generated_test_cases
 
 
 app = FastAPI(title="Web Test Agent Visualizer Backend")
 
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
+
+
+def _configured_cors_origins() -> list[str]:
+    value = os.environ.get("WEBAGENT_CORS_ORIGINS", "")
+    origins = [item.strip() for item in value.split(",") if item.strip()]
+    return origins or DEFAULT_CORS_ORIGINS
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,11 +52,33 @@ DEFAULT_TEST_CASES_FILE = "test_cases_manual.json"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/static/output", StaticFiles(directory=OUTPUT_DIR), name="output_static")
-app.mount("/static", StaticFiles(directory=OUTPUT_DIR), name="static")
 
 _current_process: subprocess.Popen | None = None
 _current_run_started_at: float | None = None
+
+
+class _PollingAccessLogFilter(logging.Filter):
+    """Keep high-frequency UI polling endpoints out of uvicorn access logs."""
+
+    _POLLING_PATHS = (
+        "GET /api/logs",
+        "GET /api/screenshots",
+        "GET /api/run/status",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(path in message for path in self._POLLING_PATHS)
+
+
+def _install_access_log_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if any(isinstance(item, _PollingAccessLogFilter) for item in access_logger.filters):
+        return
+    access_logger.addFilter(_PollingAccessLogFilter())
+
+
+_install_access_log_filter()
 
 
 def _json_default(default: Any) -> Any:
@@ -45,10 +86,27 @@ def _json_default(default: Any) -> Any:
 
 
 def _read_json_file(path: Path, default: Any = None) -> Any:
+    if path is None:
+        return _json_default(default)
     if not path.is_file():
         return _json_default(default)
-    with path.open("r", encoding="utf-8") as file:
-        return json.load(file)
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.getLogger(__name__).warning(
+            "Unable to read JSON file %s: %s", path, exc
+        )
+        return _json_default(default)
+
+
+def _write_json_file_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    os.replace(tmp_path, path)
 
 
 def _relative_path(path: Path, root: Path = BASE_DIR) -> str:
@@ -61,6 +119,19 @@ def _relative_path(path: Path, root: Path = BASE_DIR) -> str:
 def _static_output_url(path: Path, output_dir: Path = OUTPUT_DIR) -> str:
     relative = path.relative_to(output_dir).as_posix()
     return f"/static/output/{quote(relative, safe='/')}"
+
+
+def _resolve_public_output_image(relative_path: str, output_dir: Path = OUTPUT_DIR) -> Path:
+    candidate = (output_dir / relative_path).resolve()
+    output_root = output_dir.resolve()
+    try:
+        candidate.relative_to(output_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+
+    if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="File not found")
+    return candidate
 
 
 def _file_info(path: Path) -> dict[str, Any]:
@@ -81,17 +152,37 @@ def _file_info(path: Path) -> dict[str, Any]:
 
 
 def _find_test_cases_path(output_dir: Path = OUTPUT_DIR) -> Path | None:
-    preferred = [
+    candidates: list[Path] = [
         output_dir / DEFAULT_TEST_CASES_FILE,
         output_dir / "test_cases.json",
-        output_dir / "test_cases_with_sources.json",
     ]
-    for path in preferred:
-        if path.is_file():
-            return path
 
-    matches = sorted(output_dir.glob("test_cases*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return matches[0] if matches else None
+    candidates.extend(
+        sorted(
+            (
+                path for path in output_dir.glob("test_cases*.json")
+                if path.name != "test_cases_with_sources.json"
+                and path not in candidates
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    )
+
+    sources_path = output_dir / "test_cases_with_sources.json"
+    candidates.append(sources_path)
+
+    for path in candidates:
+        if _is_valid_test_cases_file(path):
+            return path
+    return None
+
+
+def _is_valid_test_cases_file(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    raw = _read_json_file(path, None)
+    return isinstance(raw, list)
 
 
 def _find_sources_path(output_dir: Path = OUTPUT_DIR) -> Path | None:
@@ -187,6 +278,109 @@ def _load_test_cases(output_dir: Path = OUTPUT_DIR) -> tuple[list[dict[str, Any]
         if isinstance(case, dict)
     ]
     return cases, cases_path
+
+
+def _load_verification_results(output_dir: Path = OUTPUT_DIR) -> dict[str, dict[str, Any]]:
+    raw = _read_json_file(output_dir / "verification_results.json", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(scenario_id): value
+        for scenario_id, value in raw.items()
+        if isinstance(value, dict)
+    }
+
+
+def _case_text(test_case: dict[str, Any]) -> str:
+    if not isinstance(test_case, dict):
+        return ""
+    return " ".join([
+        str(test_case.get("scenario_id", "")),
+        str(test_case.get("feature_id", "")),
+        str(test_case.get("scenario_name", "")),
+        " ".join(str(step) for step in test_case.get("steps", [])),
+        " ".join(str(exp) for exp in test_case.get("expectations", [])),
+    ]).lower()
+
+
+def _is_ignorable_external_registration_failure(
+    test_case: dict[str, Any],
+    verification: dict[str, Any],
+) -> bool:
+    """Return whether a verification result was explicitly marked ignorable.
+
+    The UI summary should not infer ignore status from scenario names or page
+    text. Classification belongs to the verification result itself, where it can
+    be produced by semantic validation or an upstream structured rule.
+    """
+    if verification.get("ignored") is True or verification.get("effective_status") == "ignored":
+        return True
+    return False
+
+
+def _verification_summary(
+    cases: list[dict[str, Any]],
+    verification_results: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    case_by_id = {
+        str(case.get("scenario_id") or ""): case
+        for case in cases
+        if isinstance(case, dict)
+    }
+    items: list[dict[str, Any]] = []
+    passed_count = 0
+    failed_count = 0
+    ignored_count = 0
+    raw_passed_count = 0
+    raw_failed_count = 0
+
+    for scenario_id, result in verification_results.items():
+        case = case_by_id.get(scenario_id, {})
+        ignored = _is_ignorable_external_registration_failure(case, result)
+        passed = result.get("passed") is True
+        if passed:
+            raw_passed_count += 1
+        else:
+            raw_failed_count += 1
+        if ignored:
+            status = "ignored"
+            ignored_count += 1
+        elif passed:
+            status = "passed"
+            passed_count += 1
+        else:
+            status = "failed"
+            failed_count += 1
+
+        items.append(
+            {
+                "scenario_id": scenario_id,
+                "scenario_name": case.get("scenario_name", ""),
+                "status": status,
+                "effective_status": status,
+                "raw_status": "passed" if passed else "failed",
+                "ignored": ignored,
+                "passed": passed,
+                "reason": result.get("reason", ""),
+            }
+        )
+
+    effective_total = passed_count + failed_count
+    verified_count = len(verification_results)
+    expected_count = len(cases)
+    pass_rate = round((passed_count / effective_total) * 100, 2) if effective_total else None
+    return {
+        "expected_count": expected_count,
+        "verified_count": verified_count,
+        "unverified_count": max(expected_count - verified_count, 0),
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "ignored_count": ignored_count,
+        "raw_passed_count": raw_passed_count,
+        "raw_failed_count": raw_failed_count,
+        "pass_rate": pass_rate,
+        "items": sorted(items, key=lambda item: item["scenario_id"]),
+    }
 
 
 def _load_document_index(output_dir: Path = OUTPUT_DIR) -> dict[str, Any]:
@@ -295,11 +489,106 @@ def _list_screenshot_items(
             }
         )
 
+    return _sort_screenshot_items(_dedupe_screenshot_items(items))
+
+
+def _annotate_screenshot_case_names(
+    items: list[dict[str, Any]],
+    output_dir: Path = OUTPUT_DIR,
+) -> list[dict[str, Any]]:
+    cases, _ = _load_test_cases(output_dir)
+    names_by_id = {
+        str(case.get("scenario_id") or ""): str(case.get("scenario_name") or "")
+        for case in cases
+        if isinstance(case, dict)
+    }
+    annotated = []
+    for item in items:
+        copied = dict(item)
+        scenario_id = str(copied.get("scenario_id") or "")
+        copied["scenario_name"] = names_by_id.get(scenario_id, "")
+        annotated.append(copied)
+    return annotated
+
+
+def _dedupe_screenshot_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in items:
+        key = _screenshot_dedupe_key(item)
+        current = by_key.get(key)
+        if current is None or _screenshot_keep_score(item) > _screenshot_keep_score(current):
+            by_key[key] = item
+    return list(by_key.values())
+
+
+def _screenshot_dedupe_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        item.get("scenario_id"),
+        item.get("step"),
+        _screenshot_base_name(
+            str(item.get("name") or item.get("filename") or ""),
+            item.get("step"),
+        ),
+        item.get("size"),
+        _file_content_hash(BASE_DIR / str(item.get("path") or "")),
+    )
+
+
+def _screenshot_keep_score(item: dict[str, Any]) -> tuple[int, int, float, str]:
+    filename = str(item.get("filename") or "")
+    has_status = 1 if item.get("status") else 0
+    is_numbered_copy = 1 if _is_screenshot_numbered_copy(filename, item.get("step")) else 0
+    return (
+        has_status,
+        -is_numbered_copy,
+        float(item.get("mtime") or 0),
+        filename,
+    )
+
+
+def _screenshot_base_name(name: str, step: Any = None) -> str:
+    stem = Path(str(name)).stem
+    if step is not None:
+        try:
+            step_number = int(step)
+        except (TypeError, ValueError):
+            step_number = None
+        if step_number is not None:
+            return re.sub(
+                rf"((?:^|_)step_{step_number})_\d+$",
+                r"\1",
+                stem,
+            )
+    return re.sub(r"_\d+$", "", stem)
+
+
+def _is_screenshot_numbered_copy(filename: str, step: Any = None) -> bool:
+    stem = Path(str(filename)).stem
+    if step is not None:
+        try:
+            step_number = int(step)
+        except (TypeError, ValueError):
+            step_number = None
+        if step_number is not None:
+            return re.search(rf"(?:^|_)step_{step_number}_\d+$", stem) is not None
+    return re.search(r"_\d+$", stem) is not None
+
+
+def _file_content_hash(path: Path) -> str:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def _sort_screenshot_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         items,
         key=lambda item: (
-            item.get("scenario_id") or "",
-            item.get("step") if item.get("step") is not None else 10**9,
             item.get("mtime") or 0,
             item.get("filename") or "",
         ),
@@ -333,14 +622,42 @@ def _read_log_chunk(path: Path = RUNTIME_LOG_PATH, offset: int = 0) -> dict[str,
     }
 
 
+def _runtime_log_activity(now: float | None = None) -> dict[str, Any]:
+    info = _file_info(RUNTIME_LOG_PATH)
+    mtime = info.get("mtime")
+    idle_seconds = None
+    if isinstance(mtime, (int, float)):
+        idle_seconds = max(0.0, (time.time() if now is None else now) - float(mtime))
+    return {
+        "runtime_log": info,
+        "log_size": info.get("size", 0),
+        "log_mtime": mtime,
+        "log_idle_seconds": idle_seconds,
+    }
+
+
+def _reset_runtime_log(path: Path = RUNTIME_LOG_PATH) -> None:
+    """Clear the previous run log before a new agent process starts."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8"):
+        pass
+
+
+def _reset_run_outputs(output_dir: Path = OUTPUT_DIR) -> None:
+    """Clear per-run status so UI progress belongs to the new run."""
+    _write_json_file_atomic(output_dir / "verification_results.json", {})
+
+
 def _run_status() -> dict[str, Any]:
     global _current_process
+    log_activity = _runtime_log_activity()
     if _current_process is None:
         return {
             "status": "idle",
             "pid": None,
             "returncode": None,
             "started_at": _current_run_started_at,
+            **log_activity,
         }
 
     returncode = _current_process.poll()
@@ -350,6 +667,7 @@ def _run_status() -> dict[str, Any]:
             "pid": _current_process.pid,
             "returncode": None,
             "started_at": _current_run_started_at,
+            **log_activity,
         }
 
     status = "completed" if returncode == 0 else "failed"
@@ -358,6 +676,7 @@ def _run_status() -> dict[str, Any]:
         "pid": _current_process.pid,
         "returncode": returncode,
         "started_at": _current_run_started_at,
+        **log_activity,
     }
 
 
@@ -372,14 +691,19 @@ def _prepare_selected_cases_file(case_ids: list[Any], output_dir: Path = OUTPUT_
     if not selected_cases:
         raise HTTPException(status_code=400, detail="Selected test cases were not found.")
 
+    selected_cases, removed_duplicates = prepare_generated_test_cases(selected_cases)
+    if removed_duplicates:
+        logging.getLogger(__name__).info(
+            "Removed duplicate selected test cases: %s",
+            ", ".join(str(case.get("scenario_id") or "") for case in removed_duplicates),
+        )
+
     selected_path = output_dir / "selected_test_cases.json"
-    with selected_path.open("w", encoding="utf-8") as file:
-        json.dump(selected_cases, file, ensure_ascii=False, indent=2)
-        file.write("\n")
+    _write_json_file_atomic(selected_path, selected_cases)
     return selected_path.name
 
 
-def _start_agent_process(options: dict[str, Any]) -> subprocess.Popen:
+def _build_agent_command(options: dict[str, Any]) -> list[str]:
     command = [
         sys.executable,
         str(BASE_DIR / "main.py"),
@@ -387,10 +711,15 @@ def _start_agent_process(options: dict[str, Any]) -> subprocess.Popen:
         str(options.get("url") or DEFAULT_TARGET_URL),
         "--manual-dir",
         str(options.get("manual_dir") or DEFAULT_MANUAL_DIR),
-        "--resume",
-        "--test-cases",
-        str(options.get("test_cases") or DEFAULT_TEST_CASES_FILE),
     ]
+
+    mode = str(options.get("mode") or "resume").strip().lower()
+    if mode != "full":
+        command.extend([
+            "--resume",
+            "--test-cases",
+            str(options.get("test_cases") or DEFAULT_TEST_CASES_FILE),
+        ])
 
     model = options.get("model")
     if model:
@@ -405,6 +734,11 @@ def _start_agent_process(options: dict[str, Any]) -> subprocess.Popen:
     if options.get("stub"):
         command.append("--stub")
 
+    return command
+
+
+def _start_agent_process(options: dict[str, Any]) -> subprocess.Popen:
+    command = _build_agent_command(options)
     return subprocess.Popen(command, cwd=BASE_DIR)
 
 
@@ -423,16 +757,20 @@ async def start_test(request: Request):
     if not isinstance(options, dict):
         options = {}
 
-    if isinstance(options.get("cases"), list):
+    if isinstance(options.get("cases"), list) and options.get("mode") != "full":
         options["test_cases"] = _prepare_selected_cases_file(options["cases"])
 
     _current_run_started_at = time.time()
+    _reset_runtime_log()
+    _reset_run_outputs()
     _current_process = _start_agent_process(options)
     return {
         "status": "success",
         "message": "Agent pipeline started successfully.",
         "pid": _current_process.pid,
         "started_at": _current_run_started_at,
+        "log_reset": True,
+        "mode": str(options.get("mode") or "resume"),
         "test_cases": options.get("test_cases") or DEFAULT_TEST_CASES_FILE,
     }
 
@@ -445,6 +783,11 @@ async def get_run_status():
 @app.get("/api/logs")
 async def get_logs(offset: int = 0):
     return _read_log_chunk(offset=offset)
+
+
+@app.get("/static/output/{relative_path:path}")
+async def get_output_image(relative_path: str):
+    return FileResponse(_resolve_public_output_image(relative_path))
 
 
 @app.get("/api/test-cases")
@@ -486,7 +829,9 @@ async def get_documents():
 
 @app.get("/api/screenshots")
 async def get_screenshots(scenario_id: str | None = None, since: float | None = None):
-    items = _list_screenshot_items(scenario_id=scenario_id, since=since)
+    items = _annotate_screenshot_case_names(
+        _list_screenshot_items(scenario_id=scenario_id, since=since)
+    )
     return {
         "count": len(items),
         "screenshots": [item["url"] for item in items],
@@ -497,6 +842,7 @@ async def get_screenshots(scenario_id: str | None = None, since: float | None = 
 @app.get("/api/summary")
 async def get_summary():
     cases, cases_path = _load_test_cases()
+    verification_results = _load_verification_results()
     screenshots = _list_screenshot_items()
     documents = _load_document_index()
     reports = sorted(OUTPUT_DIR.glob("report_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -510,6 +856,7 @@ async def get_summary():
         "documents": {
             "count": documents["count"],
         },
+        "verification": _verification_summary(cases, verification_results),
         "screenshots": {
             "count": len(screenshots),
         },

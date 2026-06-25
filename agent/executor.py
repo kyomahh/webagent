@@ -1,10 +1,186 @@
 """执行者节点 —— 根据 current_task 的 action 分发到对应 tools 接口方法。"""
 
 import copy
+import json
+import os
 import re
 import threading
 
 from agent.state import AgentState
+from core.test_case_dedup import prepare_generated_test_cases
+from scripts.randomize_test_case_credentials import (
+    GeneratedCredentials,
+    LAST_CREDENTIALS_FILENAME,
+    credentials_from_mapping,
+    credentials_to_dict,
+    generate_credentials,
+    randomize_test_cases,
+    write_credentials_file,
+    write_successful_credentials_file,
+)
+
+
+def _state_text(test_case: dict, *, include_steps: bool = True) -> str:
+    parts = [
+        str(test_case.get("scenario_id", "")),
+        str(test_case.get("feature_id", "")),
+        str(test_case.get("scenario_name", "")),
+    ]
+    if include_steps:
+        parts.extend(str(step) for step in test_case.get("steps", []))
+        parts.extend(str(expectation) for expectation in test_case.get("expectations", []))
+    return " ".join(parts).lower()
+
+
+def _state_case_has_business_target(test_case: dict) -> bool:
+    text = _state_text(test_case)
+    return re.search(
+        r"(allowed\s+registration\s+domains?|instance\s+(?:options|settings)|"
+        r"system\s+settings|users?|members?|board|project|card|list\s+view|"
+        r"import|export|template|label|notification|workspace|settings|"
+        r"注册域|实例设置|实例选项|系统设置|用户|成员|看板|项目|卡片|列表|"
+        r"导入|导出|模板|标签|通知|工作区|设置)",
+        text,
+        re.I,
+    ) is not None
+
+
+def _state_case_has_inline_login(test_case: dict) -> bool:
+    steps = [str(step) for step in test_case.get("steps", [])]
+    if not steps:
+        return False
+
+    early_steps = " ".join(steps[:2]).lower()
+    if re.search(r"(sso|oauth|oidc|google|github|microsoft|第三方)", early_steps, re.I):
+        return False
+    if re.search(r"(login|log in|sign in|signin|登录|登入|登陆)", early_steps, re.I) is None:
+        return False
+    return re.search(
+        r"(password|密码|email|邮箱|@[^@\s]+|as\s+an?\s+(?:admin|administrator)|管理员)",
+        early_steps,
+        re.I,
+    ) is not None
+
+
+def _state_case_is_negative_auth_test(test_case: dict) -> bool:
+    text = _state_text(test_case)
+    if re.search(r"(login|log in|sign in|signin|登录|登入|登陆)", text, re.I) is None:
+        return False
+    return re.search(
+        r"(invalid|wrong|incorrect|nonexistent|unauthorized|auth(?:entication)?\s+fail|"
+        r"login\s+fail|failure|failed|denied|无效|错误|不存在|认证失败|登录失败|拒绝)",
+        text,
+        re.I,
+    ) is not None
+
+
+def _state_case_is_pure_login_case(scenario_id: str, test_case: dict) -> bool:
+    if _state_case_has_business_target(test_case):
+        return False
+
+    feature_id = str(test_case.get("feature_id", "")).lower()
+    scenario_name = str(test_case.get("scenario_name", "")).lower()
+    if feature_id.startswith("f001"):
+        return True
+    if re.search(r"(login|log in|sign in|signin|登录|登入|登陆)", scenario_name, re.I):
+        return True
+
+    steps = [str(step).lower() for step in test_case.get("steps", [])]
+    if not steps or len(steps) > 5:
+        return False
+    steps_text = " ".join(steps)
+    if re.search(r"(login|log in|sign in|signin|登录|登入|登陆)", steps_text, re.I) is None:
+        return False
+
+    auth_only_patterns = [
+        r"email|邮箱|mail",
+        r"password|密码|pwd",
+        r"login|log in|sign in|signin|登录|登入|登陆",
+        r"open|navigate|visit|打开|访问|进入",
+        r"screenshot|verify|check|验证|检查|确认",
+        r"submit|click|button|提交|点击|按钮",
+    ]
+    return all(
+        any(re.search(pattern, step, re.I) for pattern in auth_only_patterns)
+        for step in steps
+    )
+
+
+def needs_clean_browser_state(scenario_id: str, test_case: dict) -> bool:
+    """Return whether execution should start from an empty browser profile.
+
+    Clean state is required for setup, registration, pure login, and explicit
+    negative auth flows. Business scenarios that include an inline login prelude
+    must keep the current Browser-use profile so a successful registration/login
+    chain is not discarded between cases.
+    """
+    scenario_id_lower = str(scenario_id).lower()
+
+    if test_case.get("type") == "setup":
+        return True
+    if "ts_reg" in scenario_id_lower:
+        return True
+
+    has_inline_login = _state_case_has_inline_login(test_case)
+    is_pure_login = _state_case_is_pure_login_case(scenario_id, test_case)
+    is_negative_auth = _state_case_is_negative_auth_test(test_case)
+
+    if has_inline_login and not is_pure_login and not is_negative_auth:
+        return False
+    if is_pure_login or is_negative_auth:
+        return True
+
+    steps = test_case.get("steps", [])
+    if steps:
+        first_step = str(steps[0]).lower()
+        login_page_keywords = [
+            r"打开登录页面", r"open the login page", r"navigate to login",
+            r"打开.*登录页", r"访问登录页面", r"goto login",
+        ]
+        if any(re.search(pattern, first_step, re.I) for pattern in login_page_keywords):
+            return True
+
+        register_page_keywords = [
+            r"打开注册页面", r"open the registration page", r"navigate to registration",
+            r"打开.*注册页", r"goto register", r"goto signup",
+        ]
+        if any(re.search(pattern, first_step, re.I) for pattern in register_page_keywords):
+            return True
+
+    text_to_check = _state_text(test_case, include_steps=False)
+    config_markers = [
+        r"allowed\s+registration\s+domains?",
+        r"registration\s+domains?",
+        r"users\s+registration",
+        r"instance\s+(?:options|settings)",
+        r"注册域",
+        r"用户注册",
+        r"实例设置",
+        r"实例选项",
+    ]
+    if any(re.search(pattern, text_to_check, re.I) for pattern in config_markers):
+        return False
+
+    auth_patterns = [
+        r"\b注册\b",
+        r"\bregister(?!ed)\b",
+        r"\bregistration\b",
+        r"\bsign up\b",
+        r"\bcreate account\b",
+        r"\b登录\b",
+        r"\blogin\b",
+    ]
+    if any(re.search(pattern, text_to_check, re.I) for pattern in auth_patterns):
+        skip_keywords = [
+            r"\b未注册\b",
+            r"\b重新注册\b",
+            r"\b重复注册\b",
+            r"\btest registration\b",
+            r"\b注册失败\b",
+        ]
+        return not any(re.search(pattern, text_to_check, re.I) for pattern in skip_keywords)
+
+    return False
 
 
 def make_executor_node(rag_impl, exec_impl, verify_impl, config):
@@ -14,6 +190,39 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
     """
     # 线程锁：保护状态更新的原子性
     state_update_lock = threading.Lock()
+
+    def _save_verification_results(verification_results: dict) -> None:
+        output_dir = getattr(config, "output_dir", "output") or "output"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            path = os.path.join(output_dir, "verification_results.json")
+            tmp_path = os.path.join(output_dir, ".verification_results.json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as file:
+                json.dump(verification_results, file, ensure_ascii=False, indent=2)
+                file.write("\n")
+            os.replace(tmp_path, path)
+        except (OSError, TypeError) as exc:
+            print(f"[Executor] 保存验证结果失败: {exc}")
+
+    def _candidate_credentials_path() -> str:
+        output_dir = getattr(config, "output_dir", "output") or "output"
+        return os.path.join(output_dir, LAST_CREDENTIALS_FILENAME)
+
+    def _delete_candidate_credentials_file() -> None:
+        try:
+            os.remove(_candidate_credentials_path())
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            print(f"[Executor] 删除候选账号失败: {exc}")
+
+    def _load_candidate_credentials_from_file() -> GeneratedCredentials | None:
+        try:
+            with open(_candidate_credentials_path(), "r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        return credentials_from_mapping(payload)
 
     def _reset_page_state_after_test(exec_impl, target_url: str, state: dict) -> str | None:
         """在测试用例执行后重置页面状态，确保下一个测试用例从正确状态开始。
@@ -179,78 +388,7 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
         Returns:
             是否需要清除登录态
         """
-        scenario_id_lower = str(scenario_id).lower()
-        scenario_name = str(test_case.get("scenario_name", "")).lower()
-        feature_id = str(test_case.get("feature_id", "")).lower()
-
-        # 情况1: 标记为 setup 的用例必须清除
-        if test_case.get("type") == "setup":
-            return True
-
-        # 情况2: 专门的注册用例（TS_REG 开头）
-        if "ts_reg" in scenario_id_lower:
-            return True
-
-        # 情况2.5: 登录功能测试（F001）需要从登录页开始
-        # 新手册可能不包含"Open the login page"步骤，但登录测试仍需要登录页环境
-        if feature_id.startswith("f001") or "login" in scenario_name:
-            return True
-
-        # 情况3: 基于第一个步骤的智能判断（通用策略）
-        steps = test_case.get("steps", [])
-        if steps:
-            first_step = str(steps[0]).lower()
-
-            # 3a. 如果第一步是"打开/导航到登录页面" → 需要清除
-            login_page_keywords = [
-                "打开登录页面", "open the login page", "navigate to login",
-                "打开.*登录页", "访问登录页面", "goto login"
-            ]
-            if any(re.search(kw, first_step, re.I) for kw in login_page_keywords):
-                return True
-
-            # 3b. 如果第一步是"打开/导航到注册页面" → 需要清除
-            register_page_keywords = [
-                "打开注册页面", "open the registration page", "navigate to registration",
-                "打开.*注册页", "goto register", "goto signup"
-            ]
-            if any(re.search(kw, first_step, re.I) for kw in register_page_keywords):
-                return True
-
-            # 注意：不再假设"输入邮箱/密码"表示需要登录态
-            # 因为新手册生成的登录测试第一步就是输入邮箱，但仍需要登录页环境
-            # 删除了原来的3c逻辑
-
-            # 3c. 如果第一步是"点击功能按钮/进入某页面" → 保持当前状态
-            # （假设功能测试应该在登录后的状态下执行）
-
-        # 情况4: 检查是否是失败测试用例（需要保持当前状态）
-        failure_indicators = [
-            "失败", "错误", "invalid", "wrong", "不存在", "nonexistent",
-            "cannot", "unable", "denied", "拒绝"
-        ]
-        all_text = scenario_name + " " + " ".join(str(s).lower() for s in test_case.get("steps", []))
-        is_failure_test = any(indicator in all_text for indicator in failure_indicators)
-
-        if is_failure_test:
-            # 对于失败测试，检查是否包含登录页导航关键词
-            if steps:
-                first_step = str(steps[0]).lower()
-                if any(re.search(kw, first_step, re.I) for kw in ["open the login page", "打开登录页面"]):
-                    return True  # 登录失败测试仍需要清除状态
-            return False
-
-        # 情况5: 兜底逻辑 - 包含注册/登录关键词的用例需要清除
-        # 使用单词边界匹配，避免 "register" 匹配到 "registered"
-        text_to_check = scenario_name + " " + feature_id
-        auth_patterns = [r"\b注册\b", r"\bregister(?!ed)\b", r"\bregistration\b", r"\bsign up\b", r"\bcreate account\b", r"\b登录\b", r"\blogin\b"]
-        if any(re.search(pattern, text_to_check, re.I) for pattern in auth_patterns):
-            skip_keywords = [r"\b未注册\b", r"\b重新注册\b", r"\b重复注册\b", r"\btest registration\b", r"\b注册失败\b"]
-            if not any(re.search(skip_kw, text_to_check, re.I) for skip_kw in skip_keywords):
-                return True
-
-        # 其他用例不清除登录态
-        return False
+        return needs_clean_browser_state(scenario_id, test_case)
 
     def _find_test_case(test_cases: list[dict] | None, scenario_id: str) -> dict | None:
         if not test_cases or not isinstance(test_cases, list):
@@ -259,6 +397,79 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
             if tc.get("scenario_id") == scenario_id:
                 return tc
         return None
+
+    def _current_candidate_credentials(state: dict) -> GeneratedCredentials | None:
+        memory = state.get("execution_memory", {})
+        if not isinstance(memory, dict):
+            return _load_candidate_credentials_from_file()
+        current = memory.get("current_test_credentials")
+        if not isinstance(current, dict):
+            return _load_candidate_credentials_from_file()
+        return credentials_from_mapping(current) or _load_candidate_credentials_from_file()
+
+    def _store_current_candidate_credentials(
+        exec_memory: dict,
+        credentials: GeneratedCredentials,
+        source_path: str = "",
+        status: str = "candidate",
+    ) -> None:
+        exec_memory["current_test_credentials"] = credentials_to_dict(credentials)
+        exec_memory["current_test_credentials"]["source"] = source_path
+        exec_memory["current_test_credentials"]["status"] = status
+
+    def _store_successful_registration_credentials(
+        exec_memory: dict,
+        credentials: GeneratedCredentials,
+    ) -> None:
+        exec_memory["successful_registration_credentials"] = credentials_to_dict(
+            credentials
+        )
+
+    def _refresh_registration_credentials_for_retry(
+        state: dict,
+        executable_tc: dict,
+        sid: str,
+        exec_memory: dict,
+    ) -> tuple[list[dict], dict, GeneratedCredentials] | tuple[None, None, None]:
+        if not _is_core_registration_case(executable_tc):
+            return None, None, None
+        if _test_case_negative_terms_intent(executable_tc):
+            return None, None, None
+
+        credentials = generate_credentials()
+        source_cases = copy.deepcopy(state.get("test_cases", []))
+        refreshed_tc = None
+        for index, case in enumerate(source_cases):
+            if isinstance(case, dict) and case.get("scenario_id") == sid:
+                refreshed_tc, _ = randomize_test_cases(executable_tc, credentials)
+                source_cases[index] = refreshed_tc
+                break
+        if refreshed_tc is None:
+            return None, None, None
+
+        output_dir = getattr(config, "output_dir", "output") or "output"
+        source_path = os.path.join(output_dir, "selected_test_cases.json")
+        credentials_path = write_credentials_file(
+            credentials,
+            output_dir,
+            source_path,
+            status="candidate_retry",
+        )
+        _store_current_candidate_credentials(
+            exec_memory,
+            credentials,
+            str(credentials_path),
+            status="candidate_retry",
+        )
+        exec_memory.setdefault("retry_context", {})[sid] = exec_memory.get(
+            "retry_context", {}
+        ).get(sid, [])
+        print(
+            "[Executor] 注册重试已刷新候选账号: "
+            f"email={credentials.email}, username={credentials.username}"
+        )
+        print(f"[Executor] 候选账号已保存: {credentials_path}")
+        return source_cases, refreshed_tc, credentials
 
     def _verification_failure_text(verification: dict | None) -> str:
         if not isinstance(verification, dict) or verification.get("passed"):
@@ -331,42 +542,44 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
         return False
 
     def _is_registration_case(test_case: dict) -> bool:
-        """判断测试用例是否为注册类用例。
-
-        使用混合匹配策略：
-        1. scenario_id 以 TS_REG 开头
-        2. 中文关键词直接匹配（中文没有单词边界概念）
-        3. 英文关键词使用单词边界，避免 "register" 匹配 "registered"
-        """
+        """判断测试用例是否为真正的本地账号创建流程。"""
         scenario_id = str(test_case.get("scenario_id", "")).lower()
         scenario_name = str(test_case.get("scenario_name", "")).lower()
         steps_text = " ".join(str(step) for step in test_case.get("steps", [])).lower()
 
-        # 规则1: scenario_id 以 TS_REG 开头
         if scenario_id.startswith("ts_reg"):
             return True
 
         text_to_check = scenario_name + " " + steps_text
+        config_markers = [
+            r"allowed\s+registration\s+domains?",
+            r"\busers\s+registration\b",
+            r"registration\s+domains?",
+            r"instance\s+(?:options|settings)",
+            r"系统设置",
+            r"实例设置",
+            r"注册域",
+            r"用户注册",
+            r"禁用注册",
+            r"关闭.*注册",
+            r"disable.*registration",
+            r"enable.*registration",
+        ]
+        if any(re.search(marker, text_to_check, re.I) for marker in config_markers):
+            return False
 
-        # 规则2: 中文关键词直接匹配
-        if "注册" in text_to_check:
-            return True
-
-        # 规则3: 英文关键词使用单词边界匹配
-        # 使用 \bregistration\b 完整单词匹配
-        if re.search(r"\bregistration\b", text_to_check, re.I):
-            return True
-
-        # 规则4: 步骤中包含明确的注册动作（不是 "registered"）
-        # 使用否定回顾零宽断言 (?!ed) 确保不匹配 "registered"
-        if re.search(r"\bregister(?!ed)\b", text_to_check, re.I):
-            return True
-
-        # 规则5: 包含 "create an account" 或 "sign up"
-        if re.search(r"\bcreate an account\b|\bsign up\b", text_to_check, re.I):
-            return True
-
-        return False
+        create_account_action = re.search(
+            r"(create\s+an\s+account|sign\s+up|register\s+(?:account|user)|"
+            r"click[^.\n]*(?:register|create\s+an\s+account|sign\s+up)|"
+            r"点击[^。\n]*(?:注册|创建账户|创建账号)|"
+            r"创建(?:新)?(?:账户|账号|用户)|注册(?:新)?(?:账户|账号|用户))",
+            text_to_check,
+            re.I,
+        )
+        has_credential_entry = re.search(r"\bemail\b|邮箱|郵箱", steps_text, re.I) and re.search(
+            r"\bpassword\b|密码|密碼", steps_text, re.I
+        )
+        return bool(create_account_action and has_credential_entry)
 
     def _is_external_auth_case(test_case: dict) -> bool:
         """识别 Google/GitHub/OAuth 等第三方认证用例。"""
@@ -502,6 +715,16 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                     "vector_store_path", "chroma_db"
                 )
                 cases = rag_impl.generate_scenarios(features, vector_store_path)
+                cases, removed_duplicates = prepare_generated_test_cases(cases)
+                if removed_duplicates:
+                    removed_ids = [
+                        str(case.get("scenario_id", ""))
+                        for case in removed_duplicates
+                    ]
+                    print(
+                        "[TestCaseDedup] 已移除重复测试用例: "
+                        f"{', '.join(removed_ids)}"
+                    )
                 with state_update_lock:
                     updates["test_cases"] = cases
                 summary = f"生成 {len(cases)} 个测试用例"
@@ -513,25 +736,72 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                     summary = f"未找到测试用例 {sid}"
                 else:
                     last_verification = state.get("verification_results", {}).get(sid)
-                    executable_tc = _adapt_test_case_for_retry(tc, last_verification)
-                    plan = exec_impl.plan(executable_tc)
+                    is_registration_retry = (
+                        isinstance(last_verification, dict)
+                        and last_verification.get("passed") is False
+                        and _is_core_registration_case(tc)
+                        and not _test_case_negative_terms_intent(tc)
+                    )
+                    executable_tc = (
+                        _ensure_registration_entry_steps(tc)
+                        if is_registration_retry
+                        else _adapt_test_case_for_retry(tc, last_verification)
+                    )
+                    if isinstance(last_verification, dict) and last_verification.get("passed") is False:
+                        with state_update_lock:
+                            existing_results = dict(state.get("execution_results", {}))
+                            if sid in existing_results:
+                                existing_results.pop(sid, None)
+                                updates["execution_results"] = existing_results
+                            existing_v = dict(state.get("verification_results", {}))
+                            if sid in existing_v:
+                                existing_v.pop(sid, None)
+                                updates["verification_results"] = existing_v
+                                _save_verification_results(existing_v)
                     # 注入运行配置到 memory
                     exec_memory = copy.deepcopy(state.get("execution_memory", {}))
                     if executable_tc is not tc and executable_tc.get("retry_context"):
                         exec_memory.setdefault("retry_context", {})[sid] = executable_tc["retry_context"]
+                    refreshed_cases = None
+                    if is_registration_retry:
+                        refreshed_cases, refreshed_tc, refreshed_credentials = (
+                            _refresh_registration_credentials_for_retry(
+                                state,
+                                executable_tc,
+                                sid,
+                                exec_memory,
+                            )
+                        )
+                        if refreshed_tc is not None:
+                            executable_tc = refreshed_tc
+                            tc = refreshed_tc
+                            exec_memory.get("retry_context", {}).pop(sid, None)
                     exec_memory["_config"] = {
                         "target_url": config.target_url,
                         "output_dir": config.output_dir,
                         "headless": config.headless,
                         "scenario_id": sid,
                     }
+                    if _is_core_registration_case(executable_tc) and not _test_case_negative_terms_intent(executable_tc):
+                        current_candidate = _current_candidate_credentials(state)
+                        if current_candidate is not None and "current_test_credentials" not in exec_memory:
+                            _store_current_candidate_credentials(
+                                exec_memory,
+                                current_candidate,
+                                _candidate_credentials_path(),
+                            )
+                    plan = exec_impl.plan(executable_tc)
                     # 标记当前用例是否需要清除登录态（注册/登录用例需要干净状态）
                     needs_clean = _needs_clean_state(sid, tc)
                     exec_memory["_needs_clean_state"] = needs_clean
 
                     # 实际执行状态清除（如果需要）
                     if needs_clean:
-                        clean_result = _clean_browser_state(exec_impl, config.target_url)
+                        prepare_clean_state = getattr(exec_impl, "prepare_clean_state", None)
+                        if callable(prepare_clean_state):
+                            clean_result = prepare_clean_state(config.target_url, exec_memory)
+                        else:
+                            clean_result = _clean_browser_state(exec_impl, config.target_url)
                         if clean_result:
                             print(f"[Executor] 状态清除完成: {clean_result}")
 
@@ -549,6 +819,8 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
 
                     # 线程安全的状态更新
                     with state_update_lock:
+                        if refreshed_cases is not None:
+                            updates["test_cases"] = refreshed_cases
                         existing_plans = dict(state.get("execution_plans", {}))
                         existing_plans[sid] = plan
                         updates["execution_plans"] = existing_plans
@@ -562,6 +834,7 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                         if sid in existing_v:
                             existing_v.pop(sid, None)
                             updates["verification_results"] = existing_v
+                            _save_verification_results(existing_v)
 
                         if result.get("memory"):
                             updates["execution_memory"] = result["memory"]
@@ -585,9 +858,46 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                         existing_v = dict(state.get("verification_results", {}))
                         existing_v[sid] = v
                         updates["verification_results"] = existing_v
+                    _save_verification_results(existing_v)
                     passed = v.get("passed", False)
                     reason = v.get("reason", "")
-                    summary = f"{sid}: {'通过' if passed else '失败'} - {reason}"
+                    case_name = str(tc.get("scenario_name", "") or "")
+                    if _is_core_registration_case(tc) and not _test_case_negative_terms_intent(tc):
+                        exec_memory = copy.deepcopy(state.get("execution_memory", {}))
+                        candidate_credentials = _current_candidate_credentials(
+                            {"execution_memory": exec_memory}
+                        )
+                        if passed and candidate_credentials is not None:
+                            output_dir = getattr(config, "output_dir", "output") or "output"
+                            success_path = write_successful_credentials_file(
+                                candidate_credentials,
+                                output_dir,
+                                _candidate_credentials_path(),
+                            )
+                            _store_successful_registration_credentials(
+                                exec_memory,
+                                candidate_credentials,
+                            )
+                            with state_update_lock:
+                                updates["execution_memory"] = exec_memory
+                            print(
+                                "[Executor] 注册验证通过，成功账号已保存: "
+                                f"{success_path}"
+                            )
+                        elif not passed:
+                            _delete_candidate_credentials_file()
+                            exec_memory.pop("current_test_credentials", None)
+                            with state_update_lock:
+                                updates["execution_memory"] = exec_memory
+                    if passed:
+                        summary = f"[验证通过] {sid} {case_name} - {reason}"
+                    else:
+                        summary = (
+                            "\n!!!!!!!!!! 验证失败 !!!!!!!!!!\n"
+                            f"用例: {sid} {case_name}\n"
+                            f"原因: {reason}\n"
+                            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                        )
 
             elif action == "generate_report":
                 report_state = {
@@ -595,6 +905,8 @@ def make_executor_node(rag_impl, exec_impl, verify_impl, config):
                     "execution_results": state.get("execution_results", {}),
                     "verification_results": state.get("verification_results", {}),
                     "execution_memory": state.get("execution_memory", {}),
+                    "target_url": state.get("target_url", ""),
+                    "input": state.get("input", ""),
                 }
                 path = verify_impl.visualize(report_state)
                 updates["response"] = f"报告已生成: {path}"

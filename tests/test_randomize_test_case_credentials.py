@@ -3,8 +3,12 @@ import json
 from scripts.randomize_test_case_credentials import (
     GeneratedCredentials,
     LAST_CREDENTIALS_FILENAME,
+    SUCCESSFUL_CREDENTIALS_FILENAME,
+    credentials_from_mapping,
     randomize_test_cases,
     randomize_test_cases_file,
+    write_credentials_file,
+    write_successful_credentials_file,
 )
 
 
@@ -69,4 +73,36 @@ def test_randomize_test_cases_file_writes_json(tmp_path):
     assert saved_credentials["email"] == credentials.email
     assert saved_credentials["username"] == credentials.username
     assert saved_credentials["password"] == credentials.password
+    assert saved_credentials["status"] == "candidate"
     assert saved_credentials["source"] == str(json_path)
+
+
+def test_write_credentials_file_defaults_to_candidate_status(tmp_path):
+    credentials = GeneratedCredentials(
+        username="testuser_feedface",
+        email="testuser_feedface@test.com",
+        password="Test@feedfaceA1",
+    )
+
+    saved_path = write_credentials_file(credentials, tmp_path, "cases.json")
+    payload = json.loads(saved_path.read_text(encoding="utf-8"))
+
+    assert saved_path.name == LAST_CREDENTIALS_FILENAME
+    assert payload["status"] == "candidate"
+    assert credentials_from_mapping(payload) == credentials
+
+
+def test_write_successful_credentials_file_uses_dedicated_filename(tmp_path):
+    credentials = GeneratedCredentials(
+        username="testuser_cafebabe",
+        email="testuser_cafebabe@test.com",
+        password="Test@cafebabeA1",
+    )
+
+    saved_path = write_successful_credentials_file(credentials, tmp_path, "verified.json")
+    payload = json.loads(saved_path.read_text(encoding="utf-8"))
+
+    assert saved_path.name == SUCCESSFUL_CREDENTIALS_FILENAME
+    assert payload["status"] == "successful_registration"
+    assert payload["source"] == "verified.json"
+    assert credentials_from_mapping(payload) == credentials

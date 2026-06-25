@@ -26,10 +26,24 @@ from core.fixed_account import (
     TEST_ACCOUNT_PASSWORD,
     TEST_ACCOUNT_USERNAME,
 )
-from core.test_case_dedup import remove_duplicate_successful_registration_cases
+from core.test_case_dedup import (
+    is_external_auth_case,
+    is_registration_case,
+    is_successful_core_registration_case,
+    prepare_generated_test_cases,
+    repair_generated_test_case_quality,
+)
 from core.test_case_step_normalizer import normalize_step_text, normalize_test_case_steps
 from scripts.randomize_test_case_credentials import randomize_test_cases, write_credentials_file
 from tools.rag_tool import RagToolInterface
+
+
+def _normalize_embedding_proxy_env() -> None:
+    try:
+        from core.llm import _normalize_proxy_env
+        _normalize_proxy_env()
+    except Exception:
+        pass
 
 
 class MyRagTool(RagToolInterface):
@@ -192,27 +206,31 @@ class MyRagTool(RagToolInterface):
         print(f"[RagTool] 共 {len(lc_docs)} 篇文档，分割为 {len(chunks)} 个文本块")
 
         # 分批写入 ChromaDB（每批 50 个，避免 embedding API 限流）
-        embeddings = ZhipuAIEmbeddings(model=self.config.embedding_model)
-        batch_size = 50
-        vectorstore = None
-
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i: i + batch_size]
-            if vectorstore is None:
-                vectorstore = Chroma.from_documents(
-                    documents=batch,
-                    embedding=embeddings,
-                    persist_directory=persist_dir,
-                )
-            else:
-                vectorstore.add_documents(batch)
-            print(f"[RagTool] 已向量化 {min(i + batch_size, len(chunks))}/{len(chunks)} 块")
-            time.sleep(0.3)
-
         try:
-            vectorstore.persist()
-        except AttributeError:
-            pass  # chromadb >= 0.4 自动持久化
+            _normalize_embedding_proxy_env()
+            embeddings = ZhipuAIEmbeddings(model=self.config.embedding_model)
+            batch_size = 50
+            vectorstore = None
+
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i: i + batch_size]
+                if vectorstore is None:
+                    vectorstore = Chroma.from_documents(
+                        documents=batch,
+                        embedding=embeddings,
+                        persist_directory=persist_dir,
+                    )
+                else:
+                    vectorstore.add_documents(batch)
+                print(f"[RagTool] 已向量化 {min(i + batch_size, len(chunks))}/{len(chunks)} 块")
+                time.sleep(0.3)
+
+            try:
+                vectorstore.persist()
+            except AttributeError:
+                pass  # chromadb >= 0.4 自动持久化
+        except Exception as e:
+            self._write_vector_store_fallback(chunks, persist_dir, e)
 
         print(f"[RagTool] 向量库已保存到: {persist_dir}")
         return persist_dir
@@ -238,6 +256,7 @@ class MyRagTool(RagToolInterface):
         context = ""
         feature_evidence: list[dict] = []
         try:
+            _normalize_embedding_proxy_env()
             embeddings = ZhipuAIEmbeddings(model=self.config.embedding_model)
             vectorstore = Chroma(
                 persist_directory=vector_store_path,
@@ -292,6 +311,7 @@ class MyRagTool(RagToolInterface):
 9. 如果证据包含 "+Add Board" 或 "Creating a new board"，必须提取独立的 Board Creation 功能点
 10. 按 source/title 逐页检查证据；每个包含用户操作、设置、视图、导入导出、通知、权限、卡片、列表或看板管理的页面，都必须被某个功能点覆盖
 11. 不要只提取高频功能；低频但独立可测试的页面也要提取为功能点或合并到语义相近的功能点
+12. 证据块里的 source/title/section/chunk_id 都只是文档元数据，不要直接当成 feature_name；例如 "Useful Shortcuts" 只是文档页标题，不是应用内功能点。只有当证据正文明确展示应用内可交互区域、按钮、列表或视图时，才提取为功能点
 
 手册证据片段：
 {context[:18000] or "（无手册内容）"}
@@ -300,7 +320,7 @@ class MyRagTool(RagToolInterface):
 
         try:
             from core.llm import get_llm
-            llm = get_llm(self.config.model_name)
+            llm = get_llm(self.config.model_name, temperature=0.0)
             response = llm.invoke(prompt)
             text = response.content.strip()
             # 去除 markdown 代码块包裹
@@ -371,6 +391,7 @@ class MyRagTool(RagToolInterface):
 
         vectorstore = None
         try:
+            _normalize_embedding_proxy_env()
             embeddings = ZhipuAIEmbeddings(model=self.config.embedding_model)
             vectorstore = Chroma(
                 persist_directory=vector_store_path,
@@ -381,6 +402,7 @@ class MyRagTool(RagToolInterface):
 
         test_cases = []
         scenario_counter: dict[str, int] = {}
+        llm = None
 
         # 不再强制添加 TS_REG_001
         # 让LLM根据功能点自然生成测试用例
@@ -403,7 +425,7 @@ class MyRagTool(RagToolInterface):
                 evidence = self._evidence_from_feature_citations(feat)
                 context = self._format_evidence_for_prompt(evidence, max_chars=4000)
 
-            prompt = f"""你是一个软件测试专家。请根据以下功能点和手册证据，为该功能点生成 2-3 个测试场景。
+            prompt = f"""你是一个软件测试专家。请根据以下功能点和手册证据，为该功能点生成 2-3 个高精度测试场景。
 
 功能点：
 - ID: {fid}
@@ -414,29 +436,44 @@ class MyRagTool(RagToolInterface):
 {context[:4000] or "（无相关内容）"}
 
 要求：
-1. 每个测试场景包含具体的操作步骤和预期结果
-2. 步骤应该是具体可执行的操作描述（如"点击Login按钮"、"在Email输入框中输入"）
-3. 以JSON数组格式输出，每个元素包含：
+1. 输出语言必须统一为英文；只有应用内真实 UI 文案可以保留原文（例如 "Login"、"+Add Board"）
+2. 每个测试场景只能覆盖 1 个业务意图；不要把注册、登录、创建项目、创建看板、配置设置等多个目标混进同一个场景
+3. 每个步骤必须是一个原子可执行动作，不要写 "Enter email and password then click Login" 这类合并动作
+4. 除注册用例和纯登录用例外，每个测试场景都必须从统一登录前置开始，且只能使用下面固定 5 步：
+   - Navigate to the login page of the target application
+   - Enter "{TEST_ACCOUNT_EMAIL}" in the "Email" field
+   - Enter "{TEST_ACCOUNT_PASSWORD}" in the "Password" field
+   - Click the "Login" button
+   - Confirm the dashboard, sidebar, user menu, or requested authenticated page is displayed
+5. 注册用例只生成注册动作本身，不要先登录；负向注册用例也不要混入其他业务操作
+6. 步骤应该是具体可执行的操作描述（如 "Click the \"Login\" button"、"Enter value in the \"Email\" field"）
+7. 以JSON数组格式输出，每个元素包含：
    - "scenario_name": 测试场景名称（字符串）
    - "steps": 操作步骤列表（字符串数组，至少1个）
    - "expectations": 预期结果列表（字符串数组）
    - "citations": 引用的手册证据编号数组（如 ["C1", "C3"]）
-4. 只输出JSON数组，不要有任何说明文字或markdown代码块
-5. 测试数据必须统一使用以下账号（注册和登录必须一致）：
+8. 只输出JSON数组，不要有任何说明文字或markdown代码块
+9. 测试数据必须统一使用以下账号（注册和登录必须一致）：
    - 邮箱/登录名: "{TEST_ACCOUNT_EMAIL}"
-   - 用户名: "{TEST_ACCOUNT_USERNAME}"
    - 密码: "{TEST_ACCOUNT_PASSWORD}"
-6. 重要：登录时输入的是邮箱（{TEST_ACCOUNT_EMAIL}），不是用户名！登录表单通常用 Email 字段。不要生成其他测试账号。
-7. 步骤中的按钮和输入框描述应使用实际页面上出现的文本（英文页面用英文，如"Email"、"Password"、"Login"、"Register"）
-8. 不要编造手册证据中没有出现的页面、按钮或功能；每个场景必须至少引用 1 个 citation_id，除非手册证据为空
-9. 如果需要切换到 List View，不要写 "Switch to List View" 或 "Navigate to the List View"；应写成点击看板工具栏中标记/描述为 "Board view/List view" 的视图切换控件来切换到 List view
+10. 重要：邮箱/登录名是同一个登录标识字段，只填写页面上可见的 Email/Login/Username-or-email 字段；不要把它拆成 Email 和 Username 两个输入步骤。
+11. 注册流程默认只生成邮箱/登录名、密码、可选确认密码、可选服务条款复选框、注册按钮步骤；除非手册证据明确说明注册表单存在 Name 或 Username 字段，否则不要生成 Name/Username 输入步骤。
+12. 登录时输入的是邮箱（{TEST_ACCOUNT_EMAIL}），不是用户名；登录表单通常用 Email 字段。不要生成其他测试账号。
+13. 步骤中的按钮和输入框描述应使用实际页面上出现的文本（英文页面用英文，如 "Email"、"Password"、"Login"、"Register"）
+14. 不要编造手册证据中没有出现的页面、按钮或功能；每个场景必须至少引用 1 个 citation_id，除非手册证据为空
+15. 不要生成与其他功能点语义重复的场景；如果当前功能点证据只是在重复“注册被禁用”“未接受条款”“Allowed Registration Domains”等已有意图，应只保留最贴合当前功能点的一个场景
+16. 如果需要切换到 List View，不要写 "Switch to List View" 或 "Navigate to the List View"；应写成点击看板工具栏中标记/描述为 "Board view/List view" 的视图切换控件来切换到 List view
+17. 证据块里的 source/title/section/chunk_id 都只是文档元数据，不能直接当作应用内 UI 文案；真正可用的证据只有每个块里的“证据正文”。
+18. 区分文档导航标题和应用内可见 UI：手册目录里的 "Useful Shortcuts"、"Dashboard view" 等文档页标题，不能直接当作登录后 dashboard 上的区块或列表。
+19. 如果证据里的 "Useful Shortcuts" 只是文档页标题，就不要把它改写成 dashboard 上的区块或 "Useful Links" 列表；应根据证据中明确出现的快捷键行为，生成对应的应用内操作场景
+20. 如果证据不足以支撑某个具体 UI 文案，宁可重写成证据明确支持的操作，也不要硬填一个看似相关但不存在的页面名
 
 输出（仅JSON数组）："""
 
             scenarios_raw = None
             try:
                 from core.llm import get_llm
-                llm = get_llm(self.config.model_name)
+                llm = get_llm(self.config.model_name, temperature=0.0)
                 response = llm.invoke(prompt)
                 text = response.content.strip()
                 if "```json" in text:
@@ -453,9 +490,17 @@ class MyRagTool(RagToolInterface):
             if not scenarios_raw:
                 scenarios_raw = [
                     {
-                        "scenario_name": f"测试 {fname} 基础功能",
-                        "steps": [f"打开 {fname} 页面", f"执行 {fname} 操作", "验证操作结果"],
-                        "expectations": [f"{fname} 功能正常工作"],
+                        "scenario_name": f"Verify {fname} basic behavior",
+                        "steps": [
+                            "Navigate to the login page of the target application",
+                            f'Enter "{TEST_ACCOUNT_EMAIL}" in the "Email" field',
+                            f'Enter "{TEST_ACCOUNT_PASSWORD}" in the "Password" field',
+                            'Click the "Login" button',
+                            "Confirm the dashboard, sidebar, user menu, or requested authenticated page is displayed",
+                            f"Perform the primary supported action for {fname}",
+                            "Save the resulting page evidence",
+                        ],
+                        "expectations": [f"{fname} works as described by the manual evidence"],
                     },
                 ]
 
@@ -463,6 +508,19 @@ class MyRagTool(RagToolInterface):
             for sc in scenarios_raw:
                 if not isinstance(sc, dict):
                     continue
+                if self._case_mixes_dashboard_and_useful_shortcuts(sc):
+                    regenerated = self._regenerate_precision_sensitive_scenario(
+                        llm=llm,
+                        feature_id=fid,
+                        feature_name=fname,
+                        feature_description=fdesc,
+                        evidence_context=context,
+                        rejected_case=sc,
+                    )
+                    if regenerated is not None:
+                        sc = regenerated
+                    else:
+                        sc = self._constrain_dashboard_shortcuts_case(sc)
                 raw_steps = sc.get("steps", [])
                 steps = [normalize_step_text(s) for s in raw_steps if str(s).strip()]
                 if not steps:
@@ -491,24 +549,23 @@ class MyRagTool(RagToolInterface):
 
         test_cases = self._ensure_structural_setup_cases(test_cases, features)
         test_cases = self._annotate_structural_dependencies(test_cases)
+        test_cases = self._audit_generated_test_case_precision(test_cases)
 
         print(f"[RagTool] 共生成 {len(test_cases)} 个测试用例")
 
-        test_cases, removed_registration_duplicates = (
-            remove_duplicate_successful_registration_cases(test_cases)
-        )
-        if removed_registration_duplicates:
+        test_cases, removed_duplicates = prepare_generated_test_cases(test_cases)
+        if removed_duplicates:
             removed_ids = [
                 str(case.get("scenario_id", ""))
-                for case in removed_registration_duplicates
+                for case in removed_duplicates
             ]
             print(
-                "[RagTool] 已移除重复成功注册用例: "
+                "[RagTool] 已移除重复测试用例: "
                 f"{', '.join(removed_ids)}"
             )
 
         # 确保注册用例存在且在第一位
-        test_cases = self._ensure_registration_case(test_cases)
+        test_cases = self._ensure_registration_case(test_cases, features)
         test_cases, credentials = randomize_test_cases(test_cases)
 
         # 保存测试用例到 JSON 文件，便于查看和调试
@@ -823,6 +880,135 @@ class MyRagTool(RagToolInterface):
             annotated.append(copied)
         return annotated
 
+    def _audit_generated_test_case_precision(self, test_cases: list[dict]) -> list[dict]:
+        """修正高风险的“文档标题当 UI 文案”用例。"""
+        audited: list[dict] = []
+        for case in test_cases:
+            copied = dict(case)
+            if self._case_mixes_dashboard_and_useful_shortcuts(copied):
+                copied = self._constrain_dashboard_shortcuts_case(copied)
+            audited.append(normalize_test_case_steps(copied))
+        return repair_generated_test_case_quality(audited)
+
+    @classmethod
+    def _case_mixes_dashboard_and_useful_shortcuts(cls, test_case: dict) -> bool:
+        text = cls._test_case_text(test_case)
+        normalized = text.lower()
+        return (
+            ("useful shortcuts" in normalized or "useful links" in normalized)
+            and re.search(r"\bdashboard\b|仪表盘|主看板", normalized, re.I) is not None
+            and not re.search(
+                r"ctrl\s*\+\s*enter|shift\s*\+\s*enter|shift\s*\+\s*scroll|tab|keyboard|快捷键|key combination",
+                normalized,
+                re.I,
+            )
+        )
+
+    def _constrain_dashboard_shortcuts_case(self, test_case: dict) -> dict:
+        repaired = dict(test_case)
+        repaired["scenario_name"] = self._sanitize_dashboard_shortcuts_name(
+            str(repaired.get("scenario_name", "Verify Dashboard View"))
+        )
+        repaired["steps"] = [
+            step for step in (
+                str(item).strip() for item in repaired.get("steps", [])
+            )
+            if step
+            and "useful shortcuts" not in step.lower()
+            and "useful links" not in step.lower()
+        ]
+        repaired["expectations"] = [
+            expectation for expectation in (
+                str(item).strip() for item in repaired.get("expectations", [])
+            )
+            if expectation
+            and "useful shortcuts" not in expectation.lower()
+            and "useful links" not in expectation.lower()
+        ]
+        if not repaired["steps"]:
+            repaired["steps"] = ["Verify the dashboard is displayed"]
+        if not repaired["expectations"]:
+            repaired["expectations"] = ["The dashboard is displayed"]
+        repaired["unsupported_steps"] = [
+            item
+            for item in repaired.get("unsupported_steps", [])
+            if "useful shortcuts" not in str(item).lower()
+            and "useful links" not in str(item).lower()
+        ]
+        repaired["precision_audit"] = {
+            "status": "repaired",
+            "reason": (
+                "Useful Shortcuts is a documentation page title, not an application UI label."
+            ),
+        }
+        if repaired.get("source_confidence") == "high":
+            repaired["source_confidence"] = "medium"
+        return repaired
+
+    @staticmethod
+    def _sanitize_dashboard_shortcuts_name(name: str) -> str:
+        cleaned = re.sub(r"\b(?:and\s+)?Useful Shortcuts\b", "", name, flags=re.I)
+        cleaned = re.sub(r"\b(?:and\s+)?Useful Links\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -_:")
+        if not cleaned:
+            return "Verify Dashboard View"
+        if "dashboard" not in cleaned.lower() and "主看板" not in cleaned and "仪表盘" not in cleaned:
+            return "Verify Dashboard View"
+        return cleaned
+
+    def _regenerate_precision_sensitive_scenario(
+        self,
+        llm,
+        feature_id: str,
+        feature_name: str,
+        feature_description: str,
+        evidence_context: str,
+        rejected_case: dict,
+    ) -> dict | None:
+        """针对高风险的标题/UI 混淆，重新生成单个场景。"""
+        if llm is None:
+            return None
+
+        prompt = f"""你刚才生成的测试场景包含文档标题和应用 UI 的混淆，必须重写。
+
+禁止事项：
+1. 不要把 "Useful Shortcuts"、"Dashboard view" 这类文档标题当成应用内可见区域名。
+2. 不要把文档标题改写成不存在的 "Useful Links" 列表、面板或页面。
+3. 如果证据不足以支撑具体 UI 文案，就删除该步骤并保留真实可证实的操作。
+
+请基于同一功能点重新生成 1 个测试场景，只输出 JSON 数组，数组里只能有 1 个对象。
+对象字段必须是 "scenario_name"、"steps"、"expectations"、"citations"。
+如果证据只支持快捷键操作，就生成快捷键操作；如果只支持 dashboard 导航，就生成 dashboard 导航，不要补不存在的列表名。
+
+功能点：
+- ID: {feature_id}
+- 名称: {feature_name}
+- 描述: {feature_description}
+
+手册证据片段：
+{evidence_context[:4000] or "（无相关内容）"}
+
+被拒绝的草稿：
+{json.dumps(rejected_case, ensure_ascii=False)}
+
+输出（仅JSON数组）："""
+        try:
+            response = llm.invoke(prompt)
+            text = response.content.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+            parsed = json.loads(text.strip())
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                candidate = parsed[0]
+                if self._case_mixes_dashboard_and_useful_shortcuts(candidate):
+                    return self._constrain_dashboard_shortcuts_case(candidate)
+                return candidate
+        except Exception as e:
+            print(f"[RagTool] 精度重试失败 {feature_id}: {e}")
+        return None
+
     def _make_project_creation_case(self, feature: dict, existing_cases: list[dict]) -> dict:
         citations = self._feature_citations(feature, self._evidence_from_feature_citations(feature))
         return {
@@ -836,9 +1022,11 @@ class MyRagTool(RagToolInterface):
             "source_confidence": "medium" if citations else "low",
             "unsupported_steps": [],
             "steps": [
-                f"Enter '{TEST_ACCOUNT_EMAIL}' in the 'Email' input field",
-                f"Enter '{TEST_ACCOUNT_PASSWORD}' in the 'Password' input field",
-                "Click the 'Login' button",
+                "Navigate to the login page of the target application",
+                f'Enter "{TEST_ACCOUNT_EMAIL}" in the "Email" field',
+                f'Enter "{TEST_ACCOUNT_PASSWORD}" in the "Password" field',
+                'Click the "Login" button',
+                "Confirm the dashboard, sidebar, user menu, or requested authenticated page is displayed",
                 "Click the '+Add project' button from the dashboard or the bottom of the sidebar",
                 "Enter 'Test Project' in the project name prompt",
                 "Confirm the project creation",
@@ -862,9 +1050,11 @@ class MyRagTool(RagToolInterface):
             "source_confidence": "medium" if citations else "low",
             "unsupported_steps": [],
             "steps": [
-                f"Enter '{TEST_ACCOUNT_EMAIL}' in the 'Email' input field",
-                f"Enter '{TEST_ACCOUNT_PASSWORD}' in the 'Password' input field",
-                "Click the 'Login' button",
+                "Navigate to the login page of the target application",
+                f'Enter "{TEST_ACCOUNT_EMAIL}" in the "Email" field',
+                f'Enter "{TEST_ACCOUNT_PASSWORD}" in the "Password" field',
+                'Click the "Login" button',
+                "Confirm the dashboard, sidebar, user menu, or requested authenticated page is displayed",
                 "Open the project named 'Test Project'",
                 "Click the '+Add Board' button",
                 "Enter 'Test Board' as the board name",
@@ -878,7 +1068,7 @@ class MyRagTool(RagToolInterface):
         }
 
     def _structural_case_order(self, test_case: dict) -> tuple[int, str]:
-        if self._is_core_registration_case(test_case):
+        if is_successful_core_registration_case(test_case):
             return (0, str(test_case.get("scenario_id", "")))
         if self._is_dedicated_project_creation_case(test_case):
             return (10, str(test_case.get("scenario_id", "")))
@@ -1114,6 +1304,31 @@ class MyRagTool(RagToolInterface):
         """清空本次手册对应的向量库目录，确保只包含当前加载的文档。"""
         if os.path.isdir(persist_dir):
             shutil.rmtree(persist_dir)
+
+    @staticmethod
+    def _write_vector_store_fallback(chunks: list[Document], persist_dir: str, error: Exception) -> None:
+        """Persist chunk text when the embedding backend is unavailable."""
+        fallback_path = os.path.join(persist_dir, "fallback_documents.json")
+        payload = {
+            "error": str(error),
+            "documents": [
+                {
+                    "content": chunk.page_content,
+                    "metadata": dict(chunk.metadata or {}),
+                }
+                for chunk in chunks
+            ],
+        }
+        try:
+            with open(fallback_path, "w", encoding="utf-8") as file:
+                json.dump(payload, file, ensure_ascii=False, indent=2)
+                file.write("\n")
+            print(
+                "[RagTool] 向量化失败，已保存 fallback 文档: "
+                f"{fallback_path} ({error})"
+            )
+        except OSError as write_error:
+            print(f"[RagTool] 向量化失败且 fallback 保存失败: {write_error}；原始错误: {error}")
 
     @staticmethod
     def _safe_path_slug(value: str) -> str:
@@ -1363,14 +1578,15 @@ class MyRagTool(RagToolInterface):
         parts = []
         used = 0
         for item in evidence:
-            header = (
-                f"[{item.get('citation_id')}] "
+            quote = str(item.get("quote") or "")
+            metadata = (
+                "文档元数据（仅用于定位，不要当作 UI 名称）: "
                 f"source={item.get('source', '')} "
-                f"title={item.get('title', '')} "
+                f"title(文档页标题，仅元数据)={item.get('title', '')} "
+                f"section(章节标题，仅元数据)={item.get('section', '')} "
                 f"chunk_id={item.get('chunk_id', '')}"
             )
-            quote = str(item.get("quote") or "")
-            block = f"{header}\n{quote}"
+            block = f"[{item.get('citation_id')}] 证据正文:\n{quote}\n{metadata}"
             if used + len(block) > max_chars and parts:
                 break
             parts.append(block[:max(0, max_chars - used)])
@@ -1536,7 +1752,11 @@ class MyRagTool(RagToolInterface):
                 clean[str(key)] = json.dumps(value, ensure_ascii=False, default=str)
         return clean
 
-    def _ensure_registration_case(self, test_cases: list[dict]) -> list[dict]:
+    def _ensure_registration_case(
+        self,
+        test_cases: list[dict],
+        features: list[dict] | None = None,
+    ) -> list[dict]:
         """确保测试用例中包含注册用例且在第一位。
 
         策略：
@@ -1585,55 +1805,54 @@ class MyRagTool(RagToolInterface):
         
         # 没有找到注册用例，添加备用用例
         print("[RagTool] 未找到LLM生成的注册用例，添加备用注册用例")
-        backup_case = self._make_registration_case()
+        backup_case = self._make_registration_case(
+            self._preferred_registration_feature_id(features or [])
+        )
         return [backup_case] + cases
     
     def _is_registration_case(self, test_case: dict) -> bool:
         """判断是否是注册用例。"""
-        text = " ".join([
-            str(test_case.get("scenario_id", "")),
-            str(test_case.get("feature_id", "")),
-            str(test_case.get("scenario_name", "")),
-            " ".join(str(s) for s in test_case.get("steps", [])),
-        ]).lower()
-        return any(
-            keyword in text
-            for keyword in ["注册", "register", "registration", "create an account", "sign up", "ts_reg"]
-        )
+        return is_registration_case(test_case)
 
     def _is_external_auth_case(self, test_case: dict) -> bool:
-        text = " ".join([
-            str(test_case.get("scenario_id", "")),
-            str(test_case.get("feature_id", "")),
-            str(test_case.get("scenario_name", "")),
-            " ".join(str(s) for s in test_case.get("steps", [])),
-            " ".join(str(e) for e in test_case.get("expectations", [])),
-        ]).lower()
-        return any(
-            marker in text
-            for marker in [
-                "sso",
-                "oauth",
-                "oidc",
-                "第三方",
-                "social login",
-                "external auth",
-                "google",
-                "github",
-                "microsoft",
-            ]
-        )
+        return is_external_auth_case(test_case)
 
     def _is_core_registration_case(self, test_case: dict) -> bool:
         """只把本地账号注册当作全局前置；第三方注册失败不阻断主流程。"""
-        return self._is_registration_case(test_case) and not self._is_external_auth_case(test_case)
+        return is_successful_core_registration_case(test_case)
+
+    def _preferred_registration_feature_id(self, features: list[dict]) -> str:
+        """Use the manual's registration feature id for the setup case when possible."""
+        for feature in features:
+            text = " ".join(
+                str(feature.get(key, ""))
+                for key in ("feature_id", "feature_name", "description")
+            ).lower()
+            if re.search(
+                r"(allowed\s+registration\s+domains?|instance\s+(?:options|settings)|"
+                r"system\s+settings|disable|enable|toggle|configure|"
+                r"注册域|实例设置|实例选项|系统设置|配置|禁用|启用)",
+                text,
+                re.I,
+            ):
+                continue
+            if re.search(
+                r"(user\s+registration|account\s+creation|create\s+an\s+account|"
+                r"sign\s+up|signup|register|用户注册|注册|创建账户|创建账号)",
+                text,
+                re.I,
+            ):
+                feature_id = str(feature.get("feature_id") or "").strip()
+                if feature_id:
+                    return feature_id
+        return "F_REG"
     
-    def _make_registration_case(self) -> dict:
+    def _make_registration_case(self, feature_id: str = "F_REG") -> dict:
         """创建备用注册用例。"""
         return {
             "scenario_id": "TS_REG_BACKUP",
-            "feature_id": "F_REG",
-            "scenario_name": "注册新用户（备用测试前置条件）",
+            "feature_id": feature_id or "F_REG",
+            "scenario_name": "Create a new local user account",
             "type": "setup",
             "requires": [],
             "produces": ["registered_account"],
@@ -1641,21 +1860,20 @@ class MyRagTool(RagToolInterface):
             "citations": [],
             "source_confidence": "low",
             "unsupported_steps": [
-                "备用注册用例由系统规则生成，未直接引用用户手册片段",
+                "Backup registration case generated by system rules without direct manual evidence",
             ],
             "steps": [
-                "打开目标网站登录页面",
-                "点击登录页面上的 \"Create an account\" 按钮",
-                f"在用户名输入框中输入 \"{TEST_ACCOUNT_USERNAME}\"",
-                f"在邮箱输入框中输入 \"{TEST_ACCOUNT_EMAIL}\"",
-                f"在密码输入框中输入 \"{TEST_ACCOUNT_PASSWORD}\"",
-                f"如果存在确认密码输入框，输入 \"{TEST_ACCOUNT_PASSWORD}\"",
-                "如果存在服务条款或隐私协议复选框，勾选同意",
-                "点击注册按钮",
-                "验证注册成功（页面跳转到登录页或首页）",
+                "Navigate to the login page of the target application",
+                'Click the "Create an account" button',
+                f'Enter "{TEST_ACCOUNT_EMAIL}" in the "Email" field',
+                f'Enter "{TEST_ACCOUNT_PASSWORD}" in the "Password" field',
+                f'If a confirmation password field exists, enter "{TEST_ACCOUNT_PASSWORD}"',
+                "If a Terms of service or Privacy Policy checkbox exists, check it",
+                'Click the "Register" button',
+                "Confirm the account is created and the application reaches the login page or dashboard",
             ],
             "expectations": [
-                "注册成功",
-                "页面跳转到登录页面或首页",
+                "The account is created successfully",
+                "The application redirects to the login page or dashboard",
             ],
         }

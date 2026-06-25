@@ -5,12 +5,20 @@ from typing import Any
 
 
 LIST_VIEW_TOGGLE_STEP = (
-    "Open an existing board. If the first click only expands a project or "
-    "sidebar group, continue by clicking one of its visible child board "
-    "entries; use visible hierarchy and labels instead of a fixed board name. "
-    "After the board page is open, "
-    'click the board toolbar view toggle control labeled or described as '
-    '"Board view/List view" to switch to List view.'
+    "Open an existing board and switch to List view. A board is open only "
+    "when both the board toolbar and the board content area are visible. If "
+    "the first click only expands a project, sidebar group, dashboard, or "
+    "overview, continue by clicking a visible child board entry, board card, "
+    "or content link; use visible hierarchy and labels instead of a fixed "
+    "board name. Do not treat count badges, add buttons, project titles, or "
+    "group headers as opened boards, and do not repeat the same click when "
+    "URL and visible state do not change. If an onboarding/help/getting-started "
+    "popover blocks the toolbar or content, close or dismiss it semantically "
+    "and continue. In the board toolbar, use the view toggle or selector "
+    'labeled or described as "Board view/List view"; if one icon click does '
+    'not switch, open the view menu/dropdown and choose "List view" or its '
+    "semantic equivalent. Verify List view by visible table/list rows, "
+    "columns, and bottom pagination or navigation controls before continuing."
 )
 BOARD_VIEW_TOGGLE_STEP = (
     'Click the board toolbar view toggle control labeled or described as '

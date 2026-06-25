@@ -199,6 +199,27 @@ def test_external_auth_registration_does_not_replace_core_registration_setup(tmp
     assert cases[1] == external_case
 
 
+def test_registration_domain_config_does_not_replace_core_registration_setup(tmp_path):
+    rag = _rag(tmp_path)
+    config_case = {
+        "scenario_id": "TS_F022_002",
+        "feature_id": "F022",
+        "scenario_name": "Configure Allowed Registration Domains",
+        "steps": [
+            "Login as an administrator",
+            "Open Instance options",
+            "Set Allowed Registration Domains to test.com",
+            "Click Save",
+        ],
+        "expectations": ["The instance settings are updated"],
+    }
+
+    cases = rag._ensure_registration_case([config_case])
+
+    assert cases[0]["scenario_id"] == "TS_REG_BACKUP"
+    assert cases[1] == config_case
+
+
 def test_core_registration_is_ordered_before_external_auth_registration(tmp_path):
     rag = _rag(tmp_path)
     external_case = {

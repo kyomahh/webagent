@@ -23,11 +23,22 @@ import sys
 from datetime import datetime
 
 from dotenv import load_dotenv
+from langgraph.errors import GraphRecursionError
 
 from core.fixed_account import TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD, TEST_ACCOUNT_USERNAME
-from core.test_case_dedup import remove_duplicate_successful_registration_cases
+from core.test_case_dedup import (
+    is_external_auth_case,
+    is_registration_case,
+    is_successful_core_registration_case,
+    prepare_generated_test_cases,
+    registration_case_score,
+)
 from core.test_case_step_normalizer import normalize_test_case_steps
-from scripts.randomize_test_case_credentials import randomize_test_cases, write_credentials_file
+from scripts.randomize_test_case_credentials import (
+    credentials_to_dict,
+    randomize_test_cases,
+    write_credentials_file,
+)
 
 load_dotenv()
 
@@ -94,12 +105,12 @@ def _setup_run_log():
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
     formatter = _LegacyLogFormatter()
-    stream_handler = logging.StreamHandler(original_stderr)
+    # Route logging through the Tee stream. Using a separate FileHandler for the
+    # same runtime.log corrupts ordering because two file descriptors write to
+    # the file independently.
+    stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
-    file_handler = logging.FileHandler(RUN_LOG_PATH, mode="a", encoding="utf-8")
-    file_handler.setFormatter(formatter)
     root_logger.addHandler(stream_handler)
-    root_logger.addHandler(file_handler)
 
     print(f"[RunLog] 本次运行日志: {RUN_LOG_PATH}")
     print(f"[RunLog] 开始时间: {datetime.now().isoformat(timespec='seconds')}")
@@ -138,7 +149,6 @@ def _make_registration_case() -> dict:
         "steps": [
             "打开目标网站登录页面",
             "点击登录页面上的 \"Create an account\" 按钮",
-            f"在注册页面的用户名输入框中输入 \"{TEST_ACCOUNT_USERNAME}\"",
             f"在邮箱输入框中输入 \"{TEST_ACCOUNT_EMAIL}\"",
             f"在密码输入框中输入 \"{TEST_ACCOUNT_PASSWORD}\"",
             f"如果存在确认密码输入框，输入 \"{TEST_ACCOUNT_PASSWORD}\"",
@@ -154,73 +164,20 @@ def _make_registration_case() -> dict:
 
 
 def _is_registration_case(test_case: dict) -> bool:
-    text = " ".join([
-        str(test_case.get("scenario_id", "")),
-        str(test_case.get("feature_id", "")),
-        str(test_case.get("scenario_name", "")),
-        " ".join(str(s) for s in test_case.get("steps", [])),
-    ]).lower()
-    return any(
-        keyword in text
-        for keyword in [
-            "ts_reg",
-            "注册",
-            "register",
-            "registration",
-            "create an account",
-            "sign up",
-        ]
-    )
+    return is_registration_case(test_case)
 
 
 def _is_external_auth_case(test_case: dict) -> bool:
-    text = " ".join([
-        str(test_case.get("scenario_id", "")),
-        str(test_case.get("feature_id", "")),
-        str(test_case.get("scenario_name", "")),
-        " ".join(str(s) for s in test_case.get("steps", [])),
-        " ".join(str(e) for e in test_case.get("expectations", [])),
-    ]).lower()
-    return any(
-        marker in text
-        for marker in [
-            "sso",
-            "oauth",
-            "oidc",
-            "第三方",
-            "social login",
-            "external auth",
-            "google",
-            "github",
-            "microsoft",
-        ]
-    )
+    return is_external_auth_case(test_case)
 
 
 def _is_core_registration_case(test_case: dict) -> bool:
     """只把本地账号注册当作全局前置；第三方注册失败不能阻断主流程。"""
-    return _is_registration_case(test_case) and not _is_external_auth_case(test_case)
+    return is_successful_core_registration_case(test_case)
 
 
 def _registration_case_score(test_case: dict) -> int:
-    text = " ".join([
-        str(test_case.get("scenario_id", "")),
-        str(test_case.get("feature_id", "")),
-        str(test_case.get("scenario_name", "")),
-        " ".join(str(s) for s in test_case.get("steps", [])),
-        " ".join(str(e) for e in test_case.get("expectations", [])),
-    ]).lower()
-    score = 0
-    if "ts_reg" in text or "前置" in text or "setup" in text:
-        score += 100
-    # 使用单词边界匹配，避免 "register" 匹配到 "registered"
-    import re
-    success_patterns = [r"\b成功\b", r"\b新用户\b", r"\b有效\b", r"\bcreate an account\b", r"\bregister(?!ed)\b"]
-    if any(re.search(pattern, text, re.I) for pattern in success_patterns):
-        score += 20
-    if any(keyword in text for keyword in ["失败", "错误", "已存在", "为空", "invalid", "wrong"]):
-        score -= 50
-    return score
+    return registration_case_score(test_case)
 
 
 def _ensure_registration_first(test_cases: list[dict],
@@ -239,11 +196,11 @@ def _ensure_registration_first(test_cases: list[dict],
     Returns:
         (处理后的测试用例列表, 是否添加了备用注册用例)
     """
-    cases, removed_duplicates = remove_duplicate_successful_registration_cases(list(test_cases or []))
+    cases, removed_duplicates = prepare_generated_test_cases(list(test_cases or []))
     if removed_duplicates:
         removed_ids = [str(case.get("scenario_id", "")) for case in removed_duplicates]
         print(
-            "[RegistrationCheck] 已移除重复成功注册用例: "
+            "[TestCaseDedup] 已移除重复测试用例: "
             f"{', '.join(removed_ids)}"
         )
 
@@ -482,6 +439,7 @@ def main():
             preloaded_features = []
             preloaded_cases = []
             preloaded_docs = []
+            initial_execution_memory = {}
 
             if args.resume:
                 output_dir = config.output_dir
@@ -492,15 +450,22 @@ def main():
                     with open(cases_path, "r", encoding="utf-8") as f:
                         preloaded_cases = json.load(f)
                     preloaded_cases, inserted_registration = _ensure_registration_first(preloaded_cases)
-                    preloaded_cases = [
-                        normalize_test_case_steps(case)
-                        for case in preloaded_cases
-                    ]
+                    preloaded_cases, removed_duplicates = prepare_generated_test_cases(
+                        [
+                            normalize_test_case_steps(case)
+                            for case in preloaded_cases
+                        ]
+                    )
                     preloaded_cases, credentials = randomize_test_cases(preloaded_cases)
                     with open(cases_path, "w", encoding="utf-8") as f:
                         json.dump(preloaded_cases, f, ensure_ascii=False, indent=2)
                         f.write("\n")
                     credentials_path = write_credentials_file(credentials, output_dir, cases_path)
+                    initial_execution_memory["current_test_credentials"] = {
+                        **credentials_to_dict(credentials),
+                        "source": str(credentials_path),
+                        "status": "candidate",
+                    }
                     print(f"  [Resume] 已加载 {len(preloaded_cases)} 个测试用例: {cases_path}")
                     print(
                         "  [Resume] 已随机化测试账号: "
@@ -509,6 +474,15 @@ def main():
                     print(f"  [Resume] 上次随机账号已保存: {credentials_path}")
                     if inserted_registration:
                         print("  [Resume] 旧测试用例缺少注册前置，已自动插入 TS_REG_001")
+                    if removed_duplicates:
+                        removed_ids = [
+                            str(case.get("scenario_id", ""))
+                            for case in removed_duplicates
+                        ]
+                        print(
+                            "  [Resume] 已移除重复测试用例: "
+                            f"{', '.join(removed_ids)}"
+                        )
                     # 加载功能点（可选）
                     if os.path.isfile(features_path):
                         with open(features_path, "r", encoding="utf-8") as f:
@@ -525,25 +499,40 @@ def main():
                     print(f"  [Resume] 未找到 {cases_path}，将从头开始生成测试用例")
                     args.resume = False
 
+            graph_recursion_limit = max(
+                100,
+                len(preloaded_cases if args.resume else []) * 20 + 40,
+            )
+
             # 执行
-            result = graph.invoke({
-                "target_url": config.target_url,
-                "manual_url": args.manual,
-                "manual_dir": args.manual_dir,
-                "chroma_dir": config.chroma_dir,
-                "max_retries": config.max_retries,
-                "input": initial_input,
-                "current_task": {},
-                "past_steps": [],
-                "response": "",
-                "documents": preloaded_docs if args.resume else [],
-                "features": preloaded_features if args.resume else [],
-                "test_cases": preloaded_cases if args.resume else [],
-                "execution_plans": {},
-                "execution_results": {},
-                "execution_memory": {},
-                "verification_results": {},
-            })
+            try:
+                result = graph.invoke(
+                    {
+                        "target_url": config.target_url,
+                        "manual_url": args.manual,
+                        "manual_dir": args.manual_dir,
+                        "chroma_dir": config.chroma_dir,
+                        "max_retries": config.max_retries,
+                        "input": initial_input,
+                        "current_task": {},
+                        "past_steps": [],
+                        "response": "",
+                        "documents": preloaded_docs if args.resume else [],
+                        "features": preloaded_features if args.resume else [],
+                        "test_cases": preloaded_cases if args.resume else [],
+                        "execution_plans": {},
+                        "execution_results": {},
+                        "execution_memory": initial_execution_memory,
+                        "verification_results": {},
+                    },
+                    {"recursion_limit": graph_recursion_limit},
+                )
+            except GraphRecursionError:
+                print(
+                    "[Graph] LangGraph 递归上限触发，当前运行已中止。"
+                    f"recursion_limit={graph_recursion_limit}"
+                )
+                raise
 
             print()
             print("=" * 60)

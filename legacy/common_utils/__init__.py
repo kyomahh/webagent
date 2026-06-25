@@ -46,7 +46,7 @@ def get_llm_client():
     return _client_cache
 
 
-def call_llm(prompt, task_type="unknown", model="glm-4.6v-flash", max_retries=5, base_delay=3):
+def call_llm(prompt, task_type="unknown", model="glm-4.6v", max_retries=5, base_delay=3):
     client = get_llm_client()
     for attempt in range(max_retries + 1):
         try:

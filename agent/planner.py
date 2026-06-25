@@ -6,6 +6,13 @@ import re
 from agent.state import AgentState
 from agent.prompt import build_planner_prompt, AVAILABLE_ACTIONS
 from core.llm import get_llm
+from core.llm_retry import invoke_with_backoff
+from core.test_case_dedup import (
+    is_external_auth_case,
+    is_registration_case,
+    is_successful_core_registration_case,
+    registration_case_score,
+)
 
 
 # 建立 action 名称集合，用于校验
@@ -43,39 +50,18 @@ def _verification_text(verification: dict | None) -> str:
 
 
 def _is_registration_case(test_case: dict) -> bool:
-    text = _case_text(test_case).lower()
-    return any(
-        keyword in text
-        for keyword in [
-            "ts_reg",
-            "注册",
-            "register",
-            "registration",
-            "create an account",
-            "sign up",
-        ]
-    )
+    return is_registration_case(test_case)
 
 
 def _registration_case_score(test_case: dict) -> int:
     """注册用例排序分数：优先选择能创建账号的正向/前置用例。"""
-    text = _case_text(test_case).lower()
-    score = 0
-    if "ts_reg" in text or "前置" in text or "setup" in text:
-        score += 100
-    # 使用单词边界匹配，避免 "register" 匹配到 "registered"
-    success_patterns = [r"\b成功\b", r"\b新用户\b", r"\b有效\b", r"\bcreate an account\b", r"\bregister(?!ed)\b"]
-    if any(re.search(pattern, text, re.I) for pattern in success_patterns):
-        score += 20
-    if any(keyword in text for keyword in ["失败", "错误", "已存在", "为空", "invalid", "wrong"]):
-        score -= 50
-    return score
+    return registration_case_score(test_case)
 
 
 def _find_registration_case(test_cases: list[dict]) -> dict | None:
     candidates = [
         tc for tc in test_cases
-        if _is_registration_case(tc) and not _is_external_auth_case(tc)
+        if is_successful_core_registration_case(tc)
     ]
     if not candidates:
         return None
@@ -151,21 +137,7 @@ def _find_login_case(test_cases: list[dict]) -> dict | None:
 
 
 def _is_external_auth_case(test_case: dict) -> bool:
-    text = _case_text(test_case).lower()
-    return any(
-        marker in text
-        for marker in [
-            "sso",
-            "oauth",
-            "oidc",
-            "第三方",
-            "social login",
-            "external auth",
-            "google",
-            "github",
-            "microsoft",
-        ]
-    )
+    return is_external_auth_case(test_case)
 
 
 def _case_requires(test_case: dict) -> set[str]:
@@ -193,7 +165,7 @@ def _case_produces(test_case: dict) -> set[str]:
     if isinstance(explicit, list) and explicit:
         return {str(item) for item in explicit}
 
-    if _is_registration_case(test_case):
+    if is_successful_core_registration_case(test_case):
         return {"registered_account", "authenticated_session"}
     if _is_login_case(test_case):
         return {"authenticated_session"}
@@ -393,6 +365,37 @@ def make_planner_node(config):
             and tc.get("scenario_id") not in verified_ids
         ]
 
+        for tc in test_cases:
+            sid = tc.get("scenario_id", "")
+            verification = verification_results.get(sid)
+            if not isinstance(verification, dict) or verification.get("passed") is not False:
+                continue
+            attempts = _execution_attempt_count(past_steps, sid)
+            if attempts < config.max_retries:
+                reason = (
+                    f"用例 {sid} 验证失败，仍未达到最大重试次数 "
+                    f"({attempts}/{config.max_retries})，根据失败原因重新执行"
+                )
+                print(f"[Planner] 下一步: plan_and_execute({{'scenario_id': '{sid}'}}) - {reason}")
+                return {
+                    "current_task": {
+                        "action": "plan_and_execute",
+                        "args": {"scenario_id": sid},
+                        "reason": reason,
+                    }
+                }
+
+        if test_cases and len(executed_ids) == len(test_cases) and len(verified_ids) == len(test_cases):
+            reason = "所有测试用例已执行并验证，生成最终 HTML 报告"
+            print(f"[Planner] 下一步: generate_report({{}}) - {reason}")
+            return {
+                "current_task": {
+                    "action": "generate_report",
+                    "args": {},
+                    "reason": reason,
+                }
+            }
+
         registration_case = _find_registration_case(test_cases)
         if registration_case:
             registration_id = registration_case.get("scenario_id", "")
@@ -527,10 +530,24 @@ def make_planner_node(config):
 请根据以上状态决定下一步动作，必须严格按以下 JSON 格式输出，不要输出其他内容：
 {{"action": "动作名", "args": {{"参数名": "参数值"}}, "reason": "选择原因"}}"""
 
-        response = llm.invoke([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ])
+        try:
+            response = invoke_with_backoff(
+                llm,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                operation="planner",
+            )
+        except Exception as exc:
+            action_name = _fallback_action(state)
+            args = _default_args(action_name, state)
+            reason = (
+                f"LLM 调用失败，使用状态机规则回退到 {action_name}: "
+                f"{exc.__class__.__name__}"
+            )
+            print(f"[Planner] 下一步: {action_name}({args}) - {reason}")
+            return {"current_task": {"action": action_name, "args": args, "reason": reason}}
 
         # 解析 LLM 输出
         try:

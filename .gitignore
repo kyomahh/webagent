@@ -10,6 +10,8 @@ venv/
 # Output (generated at runtime)
 output/
 tmpoutput/
+output.zip
+*.log
 
 # Local design notes
 execution_agent.md

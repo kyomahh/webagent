@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from agent.executor import needs_clean_browser_state
 from agent.planner import (
     _auth_blocker_decision,
     _case_produces,
@@ -9,6 +10,7 @@ from agent.planner import (
     _is_login_case,
 )
 from agent.replanner import _result_sets
+from agent.replanner import _retryable_failed_ids
 from core.fixed_account import TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD
 from tools.impl.execution_browser_use_impl import BrowserUseExecutionTool
 
@@ -59,6 +61,21 @@ def _core_registration_case(scenario_id="TS_REG_001"):
     }
 
 
+def _allowed_registration_domains_case():
+    return {
+        "scenario_id": "TS_F022_002",
+        "feature_id": "F022",
+        "scenario_name": "Configure Allowed Registration Domains",
+        "steps": [
+            "Login as an administrator",
+            "Open Instance options",
+            "Set Allowed Registration Domains to test.com",
+            "Click Save",
+        ],
+        "expectations": ["The instance settings are updated"],
+    }
+
+
 def test_inline_login_business_case_can_establish_auth_session():
     test_case = _inline_login_case()
 
@@ -86,6 +103,51 @@ def test_find_registration_case_ignores_external_auth_registration():
 
     core_case = _core_registration_case("TS_REG_001")
     assert _find_registration_case([google_case, core_case, github_case]) == core_case
+
+
+def test_registration_domain_config_is_not_account_registration_prerequisite():
+    config_case = _allowed_registration_domains_case()
+    core_case = _core_registration_case("TS_REG_001")
+
+    assert _find_registration_case([config_case]) is None
+    assert _case_requires(config_case) == {"authenticated_session"}
+    assert _case_produces(config_case) == set()
+    assert _find_registration_case([config_case, core_case]) == core_case
+
+
+def test_inline_login_business_case_does_not_clear_browser_use_profile():
+    test_case = _allowed_registration_domains_case()
+
+    assert needs_clean_browser_state("TS_F022_002", test_case) is False
+
+
+def test_pure_login_and_negative_login_cases_still_start_clean():
+    pure_login = {
+        "scenario_id": "TS_F001_001",
+        "feature_id": "F001",
+        "scenario_name": "User Login",
+        "steps": [
+            "Enter testuser@example.com in the Email field",
+            "Enter Test@abcd1234A1 in the Password field",
+            "Click Login",
+        ],
+        "expectations": ["The user is logged in"],
+    }
+    negative_login = {
+        "scenario_id": "TS_F001_002",
+        "feature_id": "F001",
+        "scenario_name": "Login with Invalid Password",
+        "steps": [
+            "Open the login page",
+            "Enter testuser@example.com in the Email field",
+            "Enter wrong password in the Password field",
+            "Click Login",
+        ],
+        "expectations": ["Authentication fails"],
+    }
+
+    assert needs_clean_browser_state("TS_F001_001", pure_login) is True
+    assert needs_clean_browser_state("TS_F001_002", negative_login) is True
 
 
 def test_permanent_auth_failure_stops_dependent_suite():
@@ -211,3 +273,20 @@ def test_browser_use_task_forbids_oauth_when_password_login_is_specified(tmp_pat
     assert "认证失败或账号不可用" in task
     assert "done(success=false)" in task
     assert "不要刷新页面、重复提交相同凭据或改用其他登录方式" in task
+    assert "必须先确认当前页面语义已经切换到目标页面" in task
+    assert "目标字段确实非空" in task
+    assert "保存提交后的页面证据" in task
+
+
+def test_replanner_detects_retryable_failed_cases_before_report():
+    retryable = _retryable_failed_ids(
+        {"TS_F001_002", "TS_F005_001"},
+        [
+            ("plan_and_execute", "TS_F001_002 执行完成: 0/7 步成功"),
+            ("plan_and_execute", "TS_F005_001 执行完成: 0/7 步成功"),
+            ("plan_and_execute", "TS_F005_001 执行完成: 0/7 步成功"),
+        ],
+        max_retries=2,
+    )
+
+    assert retryable == ["TS_F001_002"]

@@ -10,6 +10,7 @@
 import pytest
 
 # ──── 组员修改此处：替换为你的实现 ────
+from core.config import AgentConfig
 from tools.impl.rag_impl import MyRagTool as ImplToTest
 # from tools.stub.rag_stub import StubRagTool as ImplToTest
 
@@ -21,8 +22,101 @@ from conftest import (
 
 
 @pytest.fixture
-def rag():
-    return ImplToTest()
+def rag(tmp_path):
+    return ImplToTest(AgentConfig(
+        chroma_dir=str(tmp_path / "chroma_db"),
+        output_dir=str(tmp_path / "output"),
+    ))
+
+
+@pytest.fixture(autouse=True)
+def offline_rag_dependencies(monkeypatch):
+    """Keep RAG contract tests deterministic and off external model services."""
+    from langchain_core.documents import Document
+    import core.llm as core_llm
+    import tools.impl.rag_impl as rag_impl
+
+    default_docs = [
+        Document(
+            page_content=(
+                "Users can create an account with email and password, log in, "
+                "create projects, manage boards, and view cards in list view."
+            ),
+            metadata={
+                "source": "manual/account.txt",
+                "title": "Account",
+                "chunk_id": "doc_account_chunk_0000",
+                "chunk_index": 0,
+            },
+        )
+    ]
+
+    class FakeEmbeddings:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class FakeCollection:
+        def __init__(self, documents):
+            self._documents = list(documents)
+
+        def get(self, include=None):
+            return {
+                "documents": [doc.page_content for doc in self._documents],
+                "metadatas": [doc.metadata for doc in self._documents],
+            }
+
+    class FakeChroma:
+        _stores = {}
+
+        def __init__(self, *args, **kwargs):
+            self._persist_directory = str(kwargs.get("persist_directory") or "")
+            documents = kwargs.get("documents")
+            if documents is None:
+                documents = self._stores.get(self._persist_directory, default_docs)
+            self._documents = list(documents)
+            self._collection = FakeCollection(self._documents)
+
+        @classmethod
+        def from_documents(cls, documents, *args, **kwargs):
+            instance = cls(*args, **kwargs)
+            instance.add_documents(documents)
+            return instance
+
+        def add_documents(self, documents):
+            self._documents.extend(list(documents))
+            self._collection = FakeCollection(self._documents)
+            self._stores[self._persist_directory] = list(self._documents)
+
+        def similarity_search(self, query, k=4):
+            return self._documents[:k]
+
+        def similarity_search_with_score(self, query, k=4):
+            return [(doc, 0.0) for doc in self.similarity_search(query, k=k)]
+
+        def persist(self):
+            self._stores[self._persist_directory] = list(self._documents)
+
+    class FakeLLM:
+        def invoke(self, prompt):
+            class Response:
+                content = """[
+                  {
+                    "feature_id": "F001",
+                    "feature_name": "User Registration",
+                    "description": "Users can create an account with credentials.",
+                    "scenario_name": "Verify user registration",
+                    "steps": ["Open the registration form", "Submit valid credentials"],
+                    "expectations": ["The account flow reaches a final state"],
+                    "citations": ["C1"]
+                  }
+                ]"""
+
+            return Response()
+
+    monkeypatch.setattr(rag_impl, "ZhipuAIEmbeddings", FakeEmbeddings)
+    monkeypatch.setattr(rag_impl, "Chroma", FakeChroma)
+    monkeypatch.setattr(rag_impl.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(core_llm, "get_llm", lambda *args, **kwargs: FakeLLM())
 
 
 # ══════════════════════════════════════════════════
@@ -191,3 +285,89 @@ class TestGenerateScenarios:
         """空功能点列表不应报错。"""
         result = rag.generate_scenarios([], "chroma_db")
         assert isinstance(result, list)
+
+    def test_precision_audit_strips_dashboard_useful_shortcuts_without_relabeling(self, rag):
+        raw_case = {
+            "scenario_id": "TS_F003_001",
+            "feature_id": "F003",
+            "scenario_name": "Verify Dashboard View and Useful Shortcuts",
+            "steps": [
+                "Enter 'user@example.com' in the Email input field",
+                "Enter 'Test@12345A' in the Password input field",
+                "Click the 'Login' button",
+                "Verify the dashboard is displayed",
+                "Check that the 'Useful Shortcuts' section is visible on the page",
+            ],
+            "expectations": [
+                "The dashboard is displayed",
+                "The 'Useful Shortcuts' section is visible",
+            ],
+            "source_confidence": "high",
+            "unsupported_steps": ["Check that the 'Useful Shortcuts' section is visible on the page"],
+        }
+
+        audited = rag._audit_generated_test_case_precision([raw_case])
+
+        assert len(audited) == 1
+        repaired = audited[0]
+        assert repaired["scenario_name"] == "Verify Dashboard View"
+        assert repaired["steps"][:3] == [
+            "Enter 'user@example.com' in the Email input field",
+            "Enter 'Test@12345A' in the Password input field",
+            "Click the 'Login' button",
+        ]
+        assert "Check that the 'Useful Shortcuts' section is visible on the page" not in repaired["steps"]
+        assert repaired["expectations"] == ["The dashboard is displayed"]
+        assert all("Useful Shortcuts" not in step for step in repaired["steps"])
+        assert all("Useful Links" not in step for step in repaired["steps"])
+        assert repaired["source_confidence"] == "medium"
+
+    def test_precision_audit_retries_hallucinated_useful_links_target(self, rag, monkeypatch):
+        calls = {"count": 0}
+
+        class FakeLLM:
+            def invoke(self, prompt):
+                calls["count"] += 1
+
+                class Response:
+                    content = """[
+                      {
+                        "scenario_name": "Verify Dashboard View and Useful Links",
+                        "steps": [
+                          "Check that the 'Useful Links' list is visible on the board"
+                        ],
+                        "expectations": [
+                          "The 'Useful Links' list is visible"
+                        ],
+                        "citations": ["C1"]
+                      }
+                    ]"""
+
+                return Response()
+
+        monkeypatch.setattr("core.llm.get_llm", lambda *args, **kwargs: FakeLLM())
+
+        features = [{"feature_id": "F003", "feature_name": "Dashboard view", "description": "Open dashboard"}]
+        result = rag.generate_scenarios(features, "chroma_db")
+
+        assert calls["count"] >= 2
+        assert result
+        assert all("Useful Links" not in tc["scenario_name"] for tc in result)
+
+    def test_evidence_prompt_marks_document_titles_as_metadata(self, rag):
+        evidence = [
+            {
+                "citation_id": "C1",
+                "source": "manual/docs_shortcuts.txt",
+                "title": "Useful Shortcuts",
+                "section": "Views Description",
+                "chunk_id": "doc_shortcuts_chunk_0001",
+                "quote": "Ctrl + Enter saves text changes and opens card view.",
+            }
+        ]
+
+        prompt = rag._format_evidence_for_prompt(evidence, max_chars=1000)
+
+        assert "title(文档页标题，仅元数据)=Useful Shortcuts" in prompt
+        assert "section(章节标题，仅元数据)=Views Description" in prompt
+        assert "[C1] 证据正文:" in prompt

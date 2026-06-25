@@ -6,6 +6,7 @@ import re
 from agent.state import AgentState
 from agent.prompt import build_replanner_prompt
 from core.llm import get_llm
+from core.llm_retry import invoke_with_backoff
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -85,6 +86,27 @@ def _result_sets(test_cases: list[dict], verification_results: dict) -> tuple[se
     return passed_ids, failed_ids, ignored_ids
 
 
+def _execution_attempt_count(past_steps: list[tuple[str, str]], scenario_id: str) -> int:
+    if not scenario_id:
+        return 0
+    return sum(
+        1 for action, summary in past_steps
+        if action == "plan_and_execute" and scenario_id in str(summary)
+    )
+
+
+def _retryable_failed_ids(
+    failed_ids: set[str],
+    past_steps: list[tuple[str, str]],
+    max_retries: int,
+) -> list[str]:
+    return sorted(
+        scenario_id
+        for scenario_id in failed_ids
+        if _execution_attempt_count(past_steps, scenario_id) < max_retries
+    )
+
+
 def make_replanner_node(config):
     """创建 replanner 节点（闭包注入 config）。"""
     llm = get_llm(config.model_name)
@@ -107,9 +129,23 @@ def make_replanner_node(config):
         executed_ids = set(execution_results.keys())
         verified_ids = set(verification_results.keys())
 
-        # 如果所有测试用例都已执行并验证，流程结束
+        # 如果所有测试用例都已执行并验证，继续回到 planner，由 planner
+        # 触发 generate_report。不要在这里直接写 response，否则 executor 的
+        # visualize() 分支不会执行，最终 HTML 报告不会生成。
         if total_cases > 0 and len(executed_ids) == total_cases and len(verified_ids) == total_cases:
             passed_ids, failed_ids, ignored_ids = _result_sets(test_cases, verification_results)
+            retryable_failed = _retryable_failed_ids(
+                failed_ids,
+                state.get("past_steps", []),
+                int(config.max_retries or 0),
+            )
+            if retryable_failed:
+                print(
+                    "[Replanner] 已验证但存在失败用例仍可重试: "
+                    f"{retryable_failed}，继续交给 planner 重试。"
+                )
+                return {"response": ""}
+
             effective_total = len(passed_ids) + len(failed_ids)
             pass_rate = (
                 f"{len(passed_ids) * 100 // effective_total}%"
@@ -131,7 +167,7 @@ def make_replanner_node(config):
             print(f"[Replanner] {summary}")
             print(f"[Replanner] 当前进度 {len(verified_ids)}/{total_cases}。所有测试用例已执行并验证完毕。")
 
-            return {"response": summary}
+            return {"response": ""}
 
         # 快速路径：还有未执行的用例，继续（无需 LLM）
         if len(executed_ids) < total_cases:
@@ -172,10 +208,21 @@ def make_replanner_node(config):
 请分析当前进度，判断是否所有工作已完成。必须严格按以下 JSON 格式输出，不要输出其他内容：
 {{"response": "如果全部完成则填写报告摘要，否则留空字符串", "analysis": "对当前进度的分析"}}"""
 
-        response = llm.invoke([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ])
+        try:
+            response = invoke_with_backoff(
+                llm,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                operation="replanner",
+            )
+        except Exception as exc:
+            print(
+                "[Replanner] LLM 调用失败，保持流程继续由 planner 状态机接管: "
+                f"{exc.__class__.__name__}"
+            )
+            return {"response": ""}
 
         parsed = _parse_llm_json(response.content)
         result_response = parsed.get("response", "")

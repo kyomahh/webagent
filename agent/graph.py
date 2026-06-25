@@ -12,7 +12,20 @@ from tools.verification_tool import VerificationToolInterface
 from core.config import AgentConfig
 
 
-_MAX_ITERATIONS = 30
+_MIN_ITERATIONS = 100
+
+
+def _max_iterations_for_state(state: AgentState, config: AgentConfig) -> int:
+    """Return a conservative safety limit for the current workload.
+
+    Each case normally needs execute + verify, and retries can add another
+    execute + verify pair. Generation/reporting steps need extra headroom.
+    """
+    test_cases = state.get("test_cases", [])
+    total_cases = len(test_cases) if isinstance(test_cases, list) else 0
+    max_retries = max(0, int(getattr(config, "max_retries", 0) or 0))
+    per_case_budget = 2 + (max_retries * 2)
+    return max(_MIN_ITERATIONS, total_cases * per_case_budget + 40)
 
 
 def build_agent_graph(
@@ -50,8 +63,9 @@ def build_agent_graph(
         if state.get("response"):
             return END
         # 安全阀：超过最大迭代次数时强制结束
-        if len(state.get("past_steps", [])) >= _MAX_ITERATIONS:
-            print(f"[Graph] 已达到最大迭代次数 {_MAX_ITERATIONS}，强制结束")
+        max_iterations = _max_iterations_for_state(state, config)
+        if len(state.get("past_steps", [])) >= max_iterations:
+            print(f"[Graph] 已达到最大迭代次数 {max_iterations}，强制结束")
             return END
         return "planner"
 

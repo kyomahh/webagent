@@ -16,6 +16,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_CASES_PATH = PROJECT_ROOT / "output" / "test_cases_manual.json"
 LAST_CREDENTIALS_FILENAME = "last_test_credentials.json"
+SUCCESSFUL_CREDENTIALS_FILENAME = "successful_test_credentials.json"
 
 TEST_EMAIL_PATTERN = re.compile(
     r"\b(?:testuser[\w.-]*|webagent[\w.-]*)@(?:test\.com|example\.com)\b",
@@ -36,6 +37,21 @@ class GeneratedCredentials:
     username: str
     email: str
     password: str
+
+
+def credentials_to_dict(credentials: GeneratedCredentials) -> dict[str, str]:
+    return asdict(credentials)
+
+
+def credentials_from_mapping(value: Any) -> GeneratedCredentials | None:
+    if not isinstance(value, dict):
+        return None
+    username = str(value.get("username") or "").strip()
+    email = str(value.get("email") or "").strip()
+    password = str(value.get("password") or "").strip()
+    if not username or not email or not password:
+        return None
+    return GeneratedCredentials(username=username, email=email, password=password)
 
 
 def generate_credentials() -> GeneratedCredentials:
@@ -101,12 +117,16 @@ def write_credentials_file(
     credentials: GeneratedCredentials,
     output_dir: str | Path | None = None,
     source_path: str | Path | None = None,
+    *,
+    status: str = "candidate",
+    filename: str = LAST_CREDENTIALS_FILENAME,
 ) -> Path:
     output_path = Path(output_dir or (PROJECT_ROOT / "output"))
     output_path.mkdir(parents=True, exist_ok=True)
-    credentials_path = output_path / LAST_CREDENTIALS_FILENAME
+    credentials_path = output_path / filename
     payload = {
         **asdict(credentials),
+        "status": status,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": str(source_path) if source_path is not None else "",
     }
@@ -114,6 +134,20 @@ def write_credentials_file(
         json.dump(payload, f, ensure_ascii=False, indent=2)
         f.write("\n")
     return credentials_path
+
+
+def write_successful_credentials_file(
+    credentials: GeneratedCredentials,
+    output_dir: str | Path | None = None,
+    source_path: str | Path | None = None,
+) -> Path:
+    return write_credentials_file(
+        credentials,
+        output_dir,
+        source_path,
+        status="successful_registration",
+        filename=SUCCESSFUL_CREDENTIALS_FILENAME,
+    )
 
 
 def main() -> int:

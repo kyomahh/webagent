@@ -1,5 +1,6 @@
-from types import SimpleNamespace
 import asyncio
+import os
+from types import SimpleNamespace
 
 from agent.executor import make_executor_node
 from core.fixed_account import TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD
@@ -23,6 +24,23 @@ def _registration_without_terms_case():
             "The registration process is blocked",
             "An error message is displayed indicating that the 'Terms of service' must be accepted",
         ],
+    }
+
+
+def _successful_registration_case():
+    return {
+        "scenario_id": "TS_F001_001",
+        "feature_id": "F001",
+        "scenario_name": "Successful registration",
+        "steps": [
+            "Navigate to the 4ga Boards web address",
+            "Click the 'Create an account' button",
+            "Enter 'newuser@example.com' in the Email input field",
+            "Enter 'Test@12345A' in the Password input field",
+            "Check the checkbox to accept the 'Terms of service' and Privacy Policy",
+            "Click the Register button",
+        ],
+        "expectations": ["The registration succeeds"],
     }
 
 
@@ -111,9 +129,31 @@ def test_browser_use_plans_negative_checkbox_step_as_observation():
 
     assert negative_step["action_type"] == "wait"
     assert "保持对应元素原状态" in task
+    assert "连续 2 次点击后状态仍未变化" in task
 
 
-def test_browser_use_does_not_type_optional_name_fields():
+def test_browser_use_task_requires_positive_checkbox_state_confirmation():
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+
+    plan = tool.plan(_successful_registration_case())
+    checkbox_step = next(
+        step for step in plan
+        if "Check the checkbox" in step["action_detail"]
+    )
+    task = tool._build_browser_use_task(plan, "https://demo.4gaboards.com/", {})
+
+    assert checkbox_step["action_type"] == "click"
+    assert "必须确认 checked=true" in task
+    assert "不要继续循环点击同一个元素" in task
+
+
+def test_browser_use_keeps_required_name_fields_with_field_guard():
     tool = BrowserUseExecutionTool(
         SimpleNamespace(
             target_url="https://demo.4gaboards.com/",
@@ -126,15 +166,38 @@ def test_browser_use_does_not_type_optional_name_fields():
     test_case["steps"].insert(5, "Enter 'profile_alias_001' in the Username input field")
 
     plan = tool.plan(test_case)
-    optional_steps = [
+    name_steps = [
         step for step in plan
-        if step.get("optional") is True
+        if step.get("target_element") in {"Name", "Username"}
     ]
     task = tool._build_browser_use_task(plan, "https://demo.4gaboards.com/", {})
 
-    assert optional_steps
-    assert all(step["action_type"] == "wait" for step in optional_steps)
-    assert all(step["value"] == "" for step in optional_steps)
+    assert name_steps
+    assert all(step["action_type"] == "type" for step in name_steps)
+    assert all(step["value"] == "profile_alias_001" for step in name_steps)
+    assert all(step.get("optional") is False for step in name_steps)
+    assert all("Never type this value into fields matching" in step["field_guard"] for step in name_steps)
+    assert all("do not submit the form" in step["field_guard"] for step in name_steps)
+    assert "value=profile_alias_001" in task
+
+
+def test_browser_use_skips_explicit_optional_name_fields():
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+    test_case = _registration_without_terms_case()
+    test_case["steps"].insert(4, "Optionally enter 'profile_alias_001' in the Name input field if present")
+
+    plan = tool.plan(test_case)
+    optional_step = next(step for step in plan if step.get("optional") is True)
+    task = tool._build_browser_use_task(plan, "https://demo.4gaboards.com/", {})
+
+    assert optional_step["action_type"] == "wait"
+    assert optional_step["value"] == ""
     assert "value=profile_alias_001" not in task
     assert "不要向当前已聚焦或不匹配的输入框输入内容" in task
 
@@ -166,6 +229,82 @@ def test_browser_use_json_repair_maps_screenshot_action_to_save_as_pdf():
     assert '"screenshot"' not in repaired
     assert '"save_as_pdf"' in repaired
     assert '"file_name": "browser_use_evidence"' in repaired
+
+
+def test_browser_use_json_repair_maps_horizontal_scroll_string_to_tool():
+    repairing_cls = BrowserUseExecutionTool._get_repairing_chat_openai_class()
+
+    repaired = repairing_cls._repair_browser_use_actions('{"action":[{"scroll":"right"}]}')
+
+    assert '"scroll"' not in repaired
+    assert '"horizontal_scroll"' in repaired
+    assert '"right": true' in repaired
+
+
+def test_browser_use_plans_common_board_list_import_and_scroll_targets():
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+    case = {
+        "scenario_id": "TS_STRATEGY_001",
+        "steps": [
+            "Open the Getting Started board",
+            "Switch to List view",
+            "Click + Add Board",
+            "Open the project context menu",
+            "Click Import",
+            "Scroll horizontally to the right",
+        ],
+        "expectations": ["Common board workflows are executed"],
+    }
+
+    plan = tool.plan(case)
+    task = tool._build_browser_use_task(plan, "https://demo.4gaboards.com/", {})
+
+    list_step = next(step for step in plan if step.get("semantic_target") == "List view")
+    add_board_step = next(step for step in plan if "Click + Add Board" in step["action_detail"])
+    context_step = next(step for step in plan if "context menu" in step["action_detail"])
+    import_step = next(step for step in plan if "Click Import" in step["action_detail"])
+    horizontal_step = next(step for step in plan if "Scroll horizontally" in step["action_detail"])
+
+    assert list_step["semantic_target"] == "List view"
+    assert "已打开的 board 工具栏" in list_step["execution_hint"]
+    assert add_board_step["semantic_target"] == "+ Add Board"
+    assert "Add Project/Add Card/Add Item" in add_board_step["execution_hint"]
+    assert context_step["semantic_target"] == "context menu more options"
+    assert import_step["semantic_target"] == "Import"
+    assert horizontal_step["action_type"] == "horizontal_scroll"
+    assert horizontal_step["semantic_target"] == "horizontal scrollable board/list/table area"
+    assert "horizontal_scroll" in task
+    assert "Browser-use 内置 scroll 只表示上下滚动" in task
+    assert "board/project/card" in task
+
+
+def test_browser_use_validate_plan_preserves_execution_hint():
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+
+    fixed = tool._validate_and_fix_execute_plan([
+        {
+            "step_id": 1,
+            "action_type": "horizontal_scroll",
+            "action_detail": "Scroll horizontally",
+            "target_element": "board",
+            "execution_hint": "must confirm horizontal movement",
+        }
+    ])
+
+    assert fixed[0]["action_type"] == "horizontal_scroll"
+    assert fixed[0]["execution_hint"] == "must confirm horizontal movement"
 
 
 def test_browser_use_copies_evidence_file_to_output(tmp_path):
@@ -267,6 +406,38 @@ def test_browser_use_history_final_success_overrides_recovered_errors():
     assert "最终报告成功" in results[0]["result"]
 
 
+def test_browser_use_history_final_success_allows_recovered_visible_text_error():
+    class _RecoveredVisibleTextHistory:
+        def final_result(self):
+            return (
+                "测试执行完成。已成功完成注册流程，最终页面显示4ga Boards主界面，"
+                "表明注册和登录已成功完成。"
+            )
+
+        def errors(self):
+            return ['Visible text not found: "Create an account"']
+
+        def is_successful(self):
+            return True
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+    plan = [
+        {"step_id": 1, "action_type": "click", "action_detail": "Click Create an account"},
+        {"step_id": 2, "action_type": "click", "action_detail": "Click Register"},
+    ]
+
+    results, _ = tool._history_to_results(plan, _RecoveredVisibleTextHistory())
+
+    assert [result["success"] for result in results] == [True, True]
+    assert "可恢复的中间错误" in results[0]["result"]
+
+
 def test_browser_use_plan_normalization_tolerates_unstringable_values():
     class _UnstringableValue:
         def __str__(self):
@@ -322,6 +493,32 @@ def test_browser_use_state_screenshots_are_enabled_by_default(monkeypatch):
     assert session.calls == [((), {"include_screenshot": True, "cached": False})]
 
 
+def test_browser_use_state_screenshots_can_be_enabled(monkeypatch):
+    class _Session:
+        def __init__(self):
+            self.calls = []
+
+        async def get_browser_state_summary(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"ok": True}
+
+    monkeypatch.setenv("BROWSER_USE_STATE_SCREENSHOTS", "true")
+    session = _Session()
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+
+    tool._disable_browser_use_state_screenshots(session)
+    result = asyncio.run(session.get_browser_state_summary(include_screenshot=True, cached=False))
+
+    assert result == {"ok": True}
+    assert session.calls == [((), {"include_screenshot": True, "cached": False})]
+
+
 def test_browser_use_state_screenshots_can_be_disabled(monkeypatch):
     class _Session:
         def __init__(self):
@@ -346,6 +543,38 @@ def test_browser_use_state_screenshots_can_be_disabled(monkeypatch):
 
     assert result == {"include_screenshot": False, "cached": False}
     assert session.calls == [((), {"include_screenshot": False, "cached": False})]
+
+
+def test_browser_use_state_screenshot_timeout_retries_without_screenshot(monkeypatch):
+    class _Session:
+        def __init__(self):
+            self.calls = []
+
+        async def get_browser_state_summary(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            if kwargs.get("include_screenshot") is not False:
+                raise TimeoutError("slow screenshot")
+            return kwargs
+
+    monkeypatch.delenv("BROWSER_USE_STATE_SCREENSHOTS", raising=False)
+    monkeypatch.setenv("BROWSER_USE_STATE_SCREENSHOT_SOFT_TIMEOUT", "1")
+    session = _Session()
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+
+    tool._protect_browser_use_state_screenshots(session)
+    result = asyncio.run(session.get_browser_state_summary(include_screenshot=True, cached=False))
+
+    assert result == {"include_screenshot": False, "cached": False}
+    assert session.calls == [
+        ((), {"include_screenshot": True, "cached": False}),
+        ((), {"include_screenshot": False, "cached": False}),
+    ]
 
 
 def test_browser_use_copies_history_step_screenshots_to_output(tmp_path):
@@ -375,3 +604,292 @@ def test_browser_use_copies_history_step_screenshots_to_output(tmp_path):
 
     assert copied == [str(output_dir / "TS_F001_001_成功_step_1.png")]
     assert (output_dir / "TS_F001_001_成功_step_1.png").read_bytes() == b"step"
+
+
+def test_browser_use_skips_history_screenshot_already_copied_by_monitor(tmp_path):
+    source_dir = tmp_path / "browser_use_agent" / "screenshots"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "step_1.png"
+    source.write_bytes(b"step")
+
+    class _History:
+        def screenshot_paths(self):
+            return [str(source)]
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+
+    copied = tool._copy_history_screenshots_to_output(
+        _History(),
+        scenario_id="TS_F001_001",
+        success=True,
+        processed_source_paths={str(source.resolve())},
+    )
+
+    assert copied == []
+    assert not (output_dir / "TS_F001_001_成功_step_1.png").exists()
+
+
+def test_browser_use_collect_skips_evidence_already_copied_by_monitor(tmp_path, monkeypatch):
+    source_dir = tmp_path / "browser_use_agent" / "screenshots"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "step_2.png"
+    source.write_bytes(b"step")
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        "tools.impl.execution_browser_use_impl.glob.glob",
+        lambda _pattern: [str(source)],
+    )
+
+    copied = tool._collect_browser_use_evidence_files(
+        run_started_at=source.stat().st_mtime,
+        scenario_id="TS_F001_001",
+        success=True,
+        processed_source_paths={str(source.resolve())},
+    )
+
+    assert copied == []
+    assert not (output_dir / "TS_F001_001_成功_step_2.png").exists()
+
+
+def test_browser_use_history_to_results_marks_incomplete_form_execution_failed(tmp_path):
+    output_dir = tmp_path / "output"
+    evidence = output_dir / "TS_F001_002_step_9.png"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_bytes(b"png")
+
+    class _History:
+        pass
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+    tool._summarize_history = lambda _history: (
+        "Browser-use 最终报告成功，但页面仍然显示登录页面，"
+        "后来注册页 Email 输入框为空，证据不足。"
+    )
+    tool._extract_history_errors = lambda _history: []
+    tool._extract_history_final_success = lambda _history: True
+    plan = [
+        {"step_id": 1, "action_type": "click", "action_detail": "Click Create an account"},
+        {"step_id": 2, "action_type": "type", "action_detail": "Enter Email"},
+    ]
+
+    results, screenshots = tool._history_to_results(plan, _History(), [str(evidence)])
+
+    assert screenshots == [str(evidence)]
+    assert all(result["success"] is False for result in results)
+    assert "关键页面/表单状态不完整" in results[0]["result"]
+
+
+def test_browser_use_history_to_results_accepts_disabled_button_blocking_evidence(tmp_path):
+    output_dir = tmp_path / "output"
+    evidence = output_dir / "TS_F001_002_registration_page_evidence.pdf"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_bytes(b"%PDF-1.4\n")
+
+    class _History:
+        pass
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+    tool._summarize_history = lambda _history: (
+        "测试执行完成。输入邮箱和密码，保持服务条款未勾选。"
+        "注册按钮在服务条款未勾选时确实被禁用，符合预期行为。"
+        "PDF证据已保存，可以验证此状态。测试成功。"
+    )
+    tool._extract_history_errors = lambda _history: []
+    tool._extract_history_final_success = lambda _history: True
+    plan = [
+        {"step_id": 1, "action_type": "type", "action_detail": "Enter Email"},
+        {"step_id": 2, "action_type": "click", "action_detail": "Click Register"},
+    ]
+
+    results, screenshots = tool._history_to_results(plan, _History(), [str(evidence)])
+
+    assert screenshots == [str(evidence)]
+    assert all(result["success"] is True for result in results)
+    assert "关键页面/表单状态不完整" not in results[0]["result"]
+
+
+def test_browser_use_history_to_results_marks_checkbox_loop_disabled_register_failed(tmp_path):
+    output_dir = tmp_path / "output"
+    evidence = output_dir / "TS_F001_001_step_10.png"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_bytes(b"png")
+
+    class _History:
+        pass
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+    tool._summarize_history = lambda _history: (
+        "Stuck in a loop clicking the terms checkbox. "
+        "The checkbox remains unchecked checked=false and the register button is disabled, "
+        "preventing registration."
+    )
+    tool._extract_history_errors = lambda _history: []
+    tool._extract_history_final_success = lambda _history: True
+    plan = [
+        {"step_id": 1, "action_type": "click", "action_detail": "Check terms checkbox"},
+        {"step_id": 2, "action_type": "click", "action_detail": "Click Register"},
+    ]
+
+    results, screenshots = tool._history_to_results(plan, _History(), [str(evidence)])
+
+    assert screenshots == [str(evidence)]
+    assert all(result["success"] is False for result in results)
+    assert "关键页面/表单状态不完整" in results[0]["result"]
+
+
+def test_browser_use_history_to_results_marks_strategy_failures_failed(tmp_path):
+    output_dir = tmp_path / "output"
+    evidence = output_dir / "TS_F010_001_step_5.png"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_bytes(b"png")
+
+    class _History:
+        pass
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+    tool._summarize_history = lambda _history: (
+        "测试执行完成，success=true。However the board did not open, still dashboard. "
+        "List view is not visible and horizontal scroll position did not change."
+    )
+    tool._extract_history_errors = lambda _history: []
+    tool._extract_history_final_success = lambda _history: True
+    plan = [
+        {"step_id": 1, "action_type": "click", "action_detail": "Open board"},
+        {"step_id": 2, "action_type": "horizontal_scroll", "action_detail": "Scroll horizontally"},
+    ]
+
+    results, screenshots = tool._history_to_results(plan, _History(), [str(evidence)])
+
+    assert screenshots == [str(evidence)]
+    assert all(result["success"] is False for result in results)
+    assert "关键页面/表单状态不完整" in results[0]["result"]
+
+
+def test_browser_use_collects_pdf_with_preview_for_screenshots_api(tmp_path, monkeypatch):
+    source_root = tmp_path / "browser_use_agent_123"
+    source_dir = source_root / "browseruse_agent_data"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "list_view_evidence.pdf"
+    source.write_bytes(b"%PDF-1.4\n")
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+
+    def fake_preview(pdf_path):
+        preview = os.path.splitext(pdf_path)[0] + ".png"
+        with open(preview, "wb") as file:
+            file.write(b"preview")
+        return preview
+
+    monkeypatch.setattr(tool, "_create_pdf_preview_if_possible", fake_preview)
+
+    copied = tool._collect_browser_use_evidence_files(
+        run_started_at=source.stat().st_mtime,
+        scenario_id="TS_F010_001",
+        success=True,
+        source_dirs={str(source_root)},
+    )
+
+    pdf_path = output_dir / "TS_F010_001_成功_list_view_evidence.pdf"
+    preview_path = output_dir / "TS_F010_001_成功_list_view_evidence.png"
+    assert copied == [str(pdf_path), str(preview_path)]
+    assert pdf_path.exists()
+    assert preview_path.read_bytes() == b"preview"
+
+
+def test_browser_use_collect_skips_old_temp_evidence(tmp_path, monkeypatch):
+    source_dir = tmp_path / "browser_use_agent_old" / "screenshots"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "step_3.png"
+    source.write_bytes(b"old")
+    run_started_at = source.stat().st_mtime + 1.0
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir=str(output_dir),
+            headless=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        "tools.impl.execution_browser_use_impl.glob.glob",
+        lambda _pattern: [str(source)],
+    )
+
+    copied = tool._collect_browser_use_evidence_files(
+        run_started_at=run_started_at,
+        scenario_id="TS_F010_001",
+        success=True,
+    )
+
+    assert copied == []
+    assert not (output_dir / "TS_F010_001_成功_step_3.png").exists()
+
+
+def test_browser_use_resolve_awaitable_honors_timeout():
+    async def never_finishes():
+        await asyncio.sleep(1)
+        return "late"
+
+    tool = BrowserUseExecutionTool(
+        SimpleNamespace(
+            target_url="https://demo.4gaboards.com/",
+            output_dir="output",
+            headless=True,
+        )
+    )
+
+    try:
+        tool._resolve_maybe_awaitable(never_finishes(), timeout=0.01)
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("expected TimeoutError")
