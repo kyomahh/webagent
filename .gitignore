@@ -5,7 +5,12 @@ __pycache__/
 
 # Virtual environment
 venv/
+venv*/
 .venv/
+
+# Frontend dependencies/build output
+node_modules/
+dist/
 
 # Output (generated at runtime)
 output/
@@ -15,6 +20,7 @@ output.zip
 
 # Local design notes
 execution_agent.md
+WebAgent_结题报告.docx
 
 # ChromaDB vector store
 chroma_db/
