@@ -5,16 +5,21 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from core.test_case_dedup import prepare_generated_test_cases
 
@@ -50,11 +55,34 @@ DEFAULT_TARGET_URL = "https://demo.4gaboards.com/"
 DEFAULT_MANUAL_DIR = "./manual"
 DEFAULT_TEST_CASES_FILE = "test_cases_manual.json"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+VALID_ROLES = {ROLE_ADMIN, ROLE_USER}
+JWT_ALGORITHM = "HS256"
+DEFAULT_JWT_EXPIRE_MINUTES = 12 * 60
+DEFAULT_AUTH_USERS = {
+    "admin": {
+        "password": "admin123",
+        "role": ROLE_ADMIN,
+        "display_name": "管理员",
+    },
+    "user": {
+        "password": "user123",
+        "role": ROLE_USER,
+        "display_name": "普通用户",
+    },
+}
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _current_process: subprocess.Popen | None = None
 _current_run_started_at: float | None = None
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class _PollingAccessLogFilter(logging.Filter):
@@ -79,6 +107,145 @@ def _install_access_log_filter() -> None:
 
 
 _install_access_log_filter()
+
+
+def _load_auth_users() -> dict[str, dict[str, str]]:
+    raw_users = os.environ.get("WEBAGENT_AUTH_USERS", "").strip()
+    parsed_users: Any = None
+    if raw_users:
+        try:
+            parsed_users = json.loads(raw_users)
+        except json.JSONDecodeError as exc:
+            logging.getLogger(__name__).warning(
+                "Unable to parse WEBAGENT_AUTH_USERS, using default users: %s",
+                exc,
+            )
+
+    users = parsed_users if isinstance(parsed_users, dict) else DEFAULT_AUTH_USERS
+    normalized: dict[str, dict[str, str]] = {}
+    for raw_username, raw_account in users.items():
+        if not isinstance(raw_account, dict):
+            continue
+        username = str(raw_username or "").strip()
+        role = str(raw_account.get("role") or "").strip().lower()
+        password = str(raw_account.get("password") or "")
+        password_hash = str(raw_account.get("password_hash") or "").strip()
+        display_name = str(raw_account.get("display_name") or username).strip()
+        if not username or role not in VALID_ROLES or not (password or password_hash):
+            continue
+        normalized[username] = {
+            "password": password,
+            "password_hash": password_hash,
+            "role": role,
+            "display_name": display_name or username,
+        }
+
+    return normalized or DEFAULT_AUTH_USERS
+
+
+def _jwt_secret() -> str:
+    return os.environ.get("WEBAGENT_JWT_SECRET") or "webagent-local-dev-secret-change-me"
+
+
+def _jwt_expire_minutes() -> int:
+    value = os.environ.get("WEBAGENT_JWT_EXPIRE_MINUTES", "")
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        minutes = DEFAULT_JWT_EXPIRE_MINUTES
+    return max(1, minutes)
+
+
+def _public_user(username: str, account: dict[str, str]) -> dict[str, str]:
+    return {
+        "username": username,
+        "role": account["role"],
+        "display_name": account.get("display_name") or username,
+    }
+
+
+def _verify_bcrypt_password(password: str, password_hash: str) -> bool:
+    try:
+        import bcrypt
+
+        return bcrypt.checkpw(
+            password.encode("utf-8"),
+            password_hash.encode("utf-8"),
+        )
+    except (ImportError, TypeError, ValueError):
+        return False
+
+
+def _verify_static_password(password: str, account: dict[str, str]) -> bool:
+    password_hash = str(account.get("password_hash") or "")
+    if password_hash:
+        return _verify_bcrypt_password(password, password_hash)
+    return secrets.compare_digest(password, str(account.get("password") or ""))
+
+
+def _authenticate_user(username: str, password: str) -> dict[str, str] | None:
+    users = _load_auth_users()
+    account = users.get(username)
+    if account is None or not _verify_static_password(password, account):
+        return None
+    return _public_user(username, account)
+
+
+def _create_access_token(user: dict[str, str]) -> str:
+    issued_at = datetime.now(timezone.utc)
+    expires_at = issued_at + timedelta(minutes=_jwt_expire_minutes())
+    payload = {
+        "sub": user["username"],
+        "role": user["role"],
+        "iat": issued_at,
+        "exp": expires_at,
+    }
+    token = jwt.encode(payload, _jwt_secret(), algorithm=JWT_ALGORITHM)
+    return token if isinstance(token, str) else token.decode("utf-8")
+
+
+def _auth_exception(detail: str = "Invalid authentication credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> dict[str, str]:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise _auth_exception("Authentication required")
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            _jwt_secret(),
+            algorithms=[JWT_ALGORITHM],
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise _auth_exception("Token has expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise _auth_exception() from exc
+
+    username = str(payload.get("sub") or "").strip()
+    role = str(payload.get("role") or "").strip().lower()
+    account = _load_auth_users().get(username)
+    if account is None or account.get("role") != role:
+        raise _auth_exception()
+    return _public_user(username, account)
+
+
+def require_admin_user(
+    current_user: dict[str, str] = Depends(get_current_user),
+) -> dict[str, str]:
+    if current_user.get("role") != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+    return current_user
 
 
 def _json_default(default: Any) -> Any:
@@ -742,8 +909,33 @@ def _start_agent_process(options: dict[str, Any]) -> subprocess.Popen:
     return subprocess.Popen(command, cwd=BASE_DIR)
 
 
+@app.post("/api/auth/login")
+async def login(payload: LoginRequest):
+    user = _authenticate_user(payload.username.strip(), payload.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+
+    return {
+        "access_token": _create_access_token(user),
+        "token_type": "bearer",
+        "expires_in": _jwt_expire_minutes() * 60,
+        "user": user,
+    }
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: dict[str, str] = Depends(get_current_user)):
+    return {"user": current_user}
+
+
 @app.post("/api/start-test")
-async def start_test(request: Request):
+async def start_test(
+    request: Request,
+    _current_user: dict[str, str] = Depends(require_admin_user),
+):
     global _current_process, _current_run_started_at
 
     status = _run_status()
@@ -776,12 +968,15 @@ async def start_test(request: Request):
 
 
 @app.get("/api/run/status")
-async def get_run_status():
+async def get_run_status(_current_user: dict[str, str] = Depends(get_current_user)):
     return _run_status()
 
 
 @app.get("/api/logs")
-async def get_logs(offset: int = 0):
+async def get_logs(
+    offset: int = 0,
+    _current_user: dict[str, str] = Depends(get_current_user),
+):
     return _read_log_chunk(offset=offset)
 
 
@@ -791,7 +986,7 @@ async def get_output_image(relative_path: str):
 
 
 @app.get("/api/test-cases")
-async def get_test_cases():
+async def get_test_cases(_current_user: dict[str, str] = Depends(get_current_user)):
     cases, path = _load_test_cases()
     return {
         "path": _relative_path(path) if path else None,
@@ -801,7 +996,7 @@ async def get_test_cases():
 
 
 @app.get("/api/cases")
-async def get_cases():
+async def get_cases(_current_user: dict[str, str] = Depends(get_current_user)):
     cases, path = _load_test_cases()
     return {
         "path": _relative_path(path) if path else None,
@@ -811,7 +1006,10 @@ async def get_cases():
 
 
 @app.get("/api/test-cases/{scenario_id}")
-async def get_test_case(scenario_id: str):
+async def get_test_case(
+    scenario_id: str,
+    _current_user: dict[str, str] = Depends(get_current_user),
+):
     cases, path = _load_test_cases()
     for case in cases:
         if case.get("scenario_id") == scenario_id:
@@ -823,12 +1021,16 @@ async def get_test_case(scenario_id: str):
 
 
 @app.get("/api/documents")
-async def get_documents():
+async def get_documents(_current_user: dict[str, str] = Depends(get_current_user)):
     return _load_document_index()
 
 
 @app.get("/api/screenshots")
-async def get_screenshots(scenario_id: str | None = None, since: float | None = None):
+async def get_screenshots(
+    scenario_id: str | None = None,
+    since: float | None = None,
+    _current_user: dict[str, str] = Depends(get_current_user),
+):
     items = _annotate_screenshot_case_names(
         _list_screenshot_items(scenario_id=scenario_id, since=since)
     )
@@ -840,7 +1042,7 @@ async def get_screenshots(scenario_id: str | None = None, since: float | None = 
 
 
 @app.get("/api/summary")
-async def get_summary():
+async def get_summary(_current_user: dict[str, str] = Depends(get_current_user)):
     cases, cases_path = _load_test_cases()
     verification_results = _load_verification_results()
     screenshots = _list_screenshot_items()

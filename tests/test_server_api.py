@@ -1,11 +1,15 @@
 import os
 
 import pytest
+from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 import server
 from server import (
     _annotate_screenshot_case_names,
+    _authenticate_user,
     _build_agent_command,
+    _create_access_token,
     _list_screenshot_items,
     _load_document_index,
     _load_test_cases,
@@ -17,7 +21,51 @@ from server import (
     _run_status,
     _runtime_log_activity,
     _verification_summary,
+    get_current_user,
+    require_admin_user,
 )
+
+
+def test_authenticate_default_static_users():
+    admin = _authenticate_user("admin", "admin123")
+    user = _authenticate_user("user", "user123")
+
+    assert admin["role"] == "admin"
+    assert user["role"] == "user"
+    assert _authenticate_user("admin", "wrong") is None
+
+
+def test_access_token_round_trips_current_user():
+    user = _authenticate_user("admin", "admin123")
+    token = _create_access_token(user)
+
+    current_user = get_current_user(
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    )
+
+    assert current_user["username"] == "admin"
+    assert current_user["role"] == "admin"
+
+
+def test_current_user_requires_valid_bearer_token():
+    with pytest.raises(HTTPException) as missing:
+        get_current_user(None)
+    assert missing.value.status_code == 401
+
+    with pytest.raises(HTTPException) as invalid:
+        get_current_user(
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials="bad-token")
+        )
+    assert invalid.value.status_code == 401
+
+
+def test_admin_dependency_rejects_regular_user():
+    user = _authenticate_user("user", "user123")
+
+    with pytest.raises(HTTPException) as exc:
+        require_admin_user(user)
+
+    assert exc.value.status_code == 403
 
 
 def test_load_test_cases_exposes_document_names_and_reference_details(tmp_path):
